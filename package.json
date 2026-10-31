@@ -1,0 +1,63 @@
+{
+  "name": "neon",
+  "productName": "Neon",
+  "version": "0.1.0",
+  "description": "Minimal WLED controller for an LED neon strip: Windows tray app and Android app",
+  "license": "MIT",
+  "author": "5-4-7-0-3",
+  "repository": "github:5-4-7-0-3/wled-neon",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electron \"vite --port 5173 --strictPort\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev\"",
+    "build": "tsc --noEmit && vite build",
+    "icons": "node scripts/make-icons.cjs",
+    "start": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:android": "npm run build && cap sync android && cd android && gradlew.bat assembleDebug"
+  },
+  "build": {
+    "appId": "com.vladk.neon",
+    "productName": "Neon",
+    "electronLanguages": [
+      "uk",
+      "en-US"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Неон",
+      "runAfterFinish": true
+    }
+  },
+  "devDependencies": {
+    "@capacitor/android": "^7.6.10",
+    "@capacitor/cli": "^7.6.10",
+    "@capacitor/core": "^7.6.10",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "wait-on": "^9.5.1"
+  }
+}

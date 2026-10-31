@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Неон</string>
+    <string name="title_activity_main">Неон</string>
+    <string name="package_name">com.vladk.neon</string>
+    <string name="custom_url_scheme">com.vladk.neon</string>
+</resources>
