@@ -65,7 +65,7 @@ function parts(b: number[], len: number) {
 }
 
 // Segments for the parts in strip order; a part that wraps past the strip's end is cut in two
-function pieces(b: number[], len: number) {
+export function pieces(b: number[], len: number) {
   const out: [number, number, number][] = []
   parts(b, len).forEach(([a, z], i) => {
     if (z <= len) out.push([a, z, i])
