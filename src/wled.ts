@@ -29,8 +29,6 @@ interface WledState {
 }
 
 export const STATIC = 0
-// "Pacifica": waves run from the first room boundary along both sides to the second one
-export const SEA = 101
 
 // The number of colours is stored on the controller as the palette, which is also how
 // animated effects pick them up: "* Colors 1&2" (3) for two, "* Color Gradient" (4) for three
@@ -74,16 +72,12 @@ export function pieces(b: number[], len: number) {
   return out.filter(([a, z]) => z > a).sort((x, y) => x[0] - y[0])
 }
 
-// A static multi-colour light is one solid segment per part, the sea one mirrored segment per
-// room half, other effects a single segment. `stop: 0` deletes the segments that are not needed.
+// A static multi-colour light is one solid segment per part, effects a single segment. `stop: 0` deletes the segments that are not needed.
 export function layout(l: Light, n: number) {
   const pal = PAL_FOR_COUNT[n]
   const name = encodeBounds(l.bounds)
   const used: object[] = []
-  if (l.fx === SEA) {
-    for (const [start, stop, i] of pieces(boundsFor(l, 2), l.len))
-      used.push({ start, stop, col: l.cols, rev: i === 1, on: true, bri: 255 })
-  } else if (l.fx !== STATIC || n === 1) {
+  if (l.fx !== STATIC || n === 1) {
     used.push({ start: 0, stop: l.len, col: l.cols })
   } else {
     for (const [start, stop, i] of pieces(boundsFor(l, n), l.len))

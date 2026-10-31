@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  PAL_FOR_COUNT, SEA, STATIC, Wled, countFromPal, equalBounds, layout, pieces, toLight, type Light, type RGB,
+  PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, pieces, toLight, type Light, type RGB,
 } from './wled'
 import { desktop, getHost, setHost } from './platform'
 
@@ -20,12 +20,6 @@ interface Style { id: number; name: string; preview: string; colors?: boolean; m
 const STYLES: Style[] = [
   { id: STATIC, name: 'Статичний', preview: '', colors: true },
   { id: FLAG_ID, name: 'Прапор', preview: 'linear-gradient(90deg, #0057b7 50%, #ffd700 50%)' },
-  { id: SEA, name: 'Море', preview: 'linear-gradient(90deg, #001a4d, #0077be, #00c9c8, #0077be, #001a4d)', moving: true },
-  { id: 2, name: 'Дихання', preview: '', colors: true, moving: true },
-  { id: 88, name: 'Свічка', preview: 'linear-gradient(90deg, #a33a00, #ff9a2e, #ffc46b, #ff8a1e, #a33a00)', colors: true, moving: true },
-  { id: 66, name: 'Вогонь', preview: 'linear-gradient(90deg, #2a0000, #ff3d00, #ffb300, #ff3d00, #2a0000)', moving: true },
-  { id: 9, name: 'Веселка', preview: 'linear-gradient(90deg, red, #ff0, lime, cyan, blue, #f0f, red)', moving: true },
-  { id: 38, name: 'Аврора', preview: 'linear-gradient(90deg, #00ff9c, #00b3ff, #7a00ff, #00ff9c)', moving: true },
   { id: 17, name: 'Мерехтіння', preview: '', colors: true, moving: true },
   { id: 67, name: 'Хвилі', preview: '', colors: true, moving: true },
 ]
@@ -82,7 +76,6 @@ function useThrottle<T>(fn: (v: T) => void, ms: number) {
 
 function preview(s: Style, cols: RGB[]) {
   if (s.preview) return s.preview
-  if (s.id === 2) return `radial-gradient(circle, ${css(cols[0])}, #111 75%)`
   if (s.id === 17) return `radial-gradient(${css(cols[0])} 18%, transparent 22%) 0 0 / 14px 14px, #15151c`
   if (cols.length === 1) return css(cols[0])
   if (s.id === STATIC) {
