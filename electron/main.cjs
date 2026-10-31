@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain } = require('electron')
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, session, desktopCapturer } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
+const dgram = require('node:dgram')
 const { ringIcon } = require('./icon.cjs')
 
 if (!app.requestSingleInstanceLock()) app.quit()
@@ -12,6 +13,18 @@ const WIDTH = 360
 
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json')
 let cfg = { host: '192.168.1.12', autostartSet: false, anthem: true }
+
+// The room as measured on the strip, in the controller's LED order (its LED map starts in the
+// middle of the right short wall). Each wall: first LED, LED count and the direction the strip
+// runs. The screen wall runs from the picture's left edge to its right with the monitor centre at
+// `center`; side walls run from the screen towards the bed; `bed` is the stretch above the bed.
+const ROOM = {
+  len: 136,
+  screen: { start: 54, count: 43, step: -1, center: 21 },
+  left: { start: 55, count: 26, step: 1 },
+  right: { start: 11, count: 25, step: -1 },
+  bed: { start: 82, count: 17 },
+}
 
 function loadConfig() {
   try {
@@ -46,6 +59,9 @@ function connect() {
       if (!s) return
       light = { on: s.on, col: s.seg?.[0]?.col?.[0]?.slice(0, 3) ?? light.col }
       refreshTray()
+      const cinema = s.on && (s.seg?.[0]?.n ?? '').split(';').includes('cinema')
+      if (cinema && !cinemaWin) startCinema()
+      if (!cinema && cinemaWin) stopCinema()
     } catch {
       // Non-JSON frames are not state updates
     }
@@ -65,6 +81,35 @@ function send(patch) {
     body: JSON.stringify(patch),
   }).catch(() => {})
 }
+
+// ---- Cinema: paint the room from the screen ----
+
+let cinemaWin, udp
+
+function startCinema() {
+  udp = dgram.createSocket('udp4')
+  cinemaWin = new BrowserWindow({
+    show: false,
+    webPreferences: { preload: path.join(__dirname, 'cinema-preload.cjs'), backgroundThrottling: false },
+  })
+  cinemaWin.loadFile(path.join(__dirname, 'cinema.html'))
+}
+
+function stopCinema() {
+  cinemaWin?.destroy()
+  cinemaWin = undefined
+  udp?.close()
+  udp = undefined
+  // Leave realtime mode right away instead of waiting for the controller's timeout
+  send({ live: false })
+}
+
+ipcMain.handle('cinema:room', () => ROOM)
+ipcMain.on('cinema:frame', (_e, rgb) => {
+  if (!udp) return
+  // WLED "DRGB" realtime packet: protocol 2, then seconds to hold the frame if the stream stops
+  udp.send(Buffer.concat([Buffer.from([2, 2]), Buffer.from(rgb)]), 21324, cfg.host)
+})
 
 // ---- Anthem: show the flag while the Ukrainian anthem plays ----
 
@@ -243,6 +288,11 @@ app.on('window-all-closed', (e) => e.preventDefault())
 app.whenReady().then(() => {
   app.setAppUserModelId('com.vladk.neon')
   loadConfig()
+
+  // Cinema mode captures the main screen without asking each time
+  session.defaultSession.setDisplayMediaRequestHandler((_req, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => callback({ video: sources[0] }), () => callback(null))
+  })
 
   // Launching with Windows is on by default; the tray menu can switch it off
   if (app.isPackaged && !cfg.autostartSet) {

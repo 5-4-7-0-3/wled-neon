@@ -10,6 +10,15 @@ export interface Light {
   // Where each colour part starts, per colour count (index 2 and 3)
   bounds: number[][]
   len: number
+  // Preset the controller says is active, -1 after any change
+  ps: number
+  // The desktop app paints the room from the screen while this is set
+  cinema: boolean
+}
+
+export interface Preset {
+  id: number
+  name: string
 }
 
 interface WledSegment {
@@ -25,6 +34,7 @@ interface WledSegment {
 interface WledState {
   on: boolean
   bri: number
+  ps?: number
   seg?: WledSegment[]
 }
 
@@ -37,15 +47,19 @@ export const countFromPal = (pal: number) => (pal === 4 ? 3 : pal === 3 ? 2 : 1)
 
 // The strip runs around the room, so the parts are rarely equal: the user puts each boundary
 // where it fits the walls. The boundaries are kept on the controller in segment 0's name
-// ("2:0,68;3:0,55,111"), so every device shows the same split. The controller's LED map starts
+// ("2:0,68;3:0,55,111"), so every device shows the same split. The same name carries the
+// cinema flag, which the desktop app watches. The controller's LED map starts
 // the strip in the middle of a short wall, so the default two-part split halves the room.
 export const equalBounds = (n: number, len: number) =>
   Array.from({ length: n }, (_, i) => Math.round((len * i) / n))
 
 const boundsFor = (l: Pick<Light, 'bounds' | 'len'>, n: number) => l.bounds[n] ?? equalBounds(n, l.len)
 
-const encodeBounds = (bounds: number[][]) =>
-  [2, 3].filter((n) => bounds[n]).map((n) => `${n}:${bounds[n].join(',')}`).join(';')
+const CINEMA = 'cinema'
+
+const encodeName = (l: Light) =>
+  [...[2, 3].filter((n) => l.bounds[n]).map((n) => `${n}:${l.bounds[n].join(',')}`), ...(l.cinema ? [CINEMA] : [])]
+    .join(';')
 
 function decodeBounds(name: string | undefined, prev: number[][]) {
   const out = [...prev]
@@ -72,10 +86,11 @@ export function pieces(b: number[], len: number) {
   return out.filter(([a, z]) => z > a).sort((x, y) => x[0] - y[0])
 }
 
-// A static multi-colour light is one solid segment per part, effects a single segment. `stop: 0` deletes the segments that are not needed.
+// A static multi-colour light is one solid segment per part, effects a single segment.
+// `stop: 0` deletes the segments that are not needed.
 export function layout(l: Light, n: number) {
   const pal = PAL_FOR_COUNT[n]
-  const name = encodeBounds(l.bounds)
+  const name = encodeName(l)
   const used: object[] = []
   if (l.fx !== STATIC || n === 1) {
     used.push({ start: 0, stop: l.len, col: l.cols })
@@ -114,6 +129,8 @@ export function toLight(s: WledState, prev: Light): Light {
     pal,
     bounds,
     len,
+    ps: s.ps ?? prev.ps,
+    cinema: seg.n === undefined ? prev.cinema : seg.n.split(';').includes(CINEMA),
   }
 }
 
@@ -166,6 +183,23 @@ export class Wled {
       headers: { 'Content-Type': 'application/json' },
       body,
     }).catch(() => {})
+  }
+
+  async presets(): Promise<Preset[]> {
+    const all: Record<string, { n?: string }> = await fetch(`http://${this.host}/presets.json`).then((r) => r.json())
+    return Object.entries(all)
+      .filter(([id, p]) => +id > 0 && p.n)
+      .map(([id, p]) => ({ id: +id, name: p.n! }))
+      .sort((a, b) => a.id - b.id)
+  }
+
+  // The controller writes presets to flash, which takes a moment; callers re-read the list after
+  savePreset(id: number, name: string) {
+    this.send({ psave: id, n: name, ib: true, sb: true })
+  }
+
+  deletePreset(id: number) {
+    this.send({ pdel: id })
   }
 
   close() {

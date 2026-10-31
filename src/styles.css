@@ -134,6 +134,27 @@ input[type=range]::-webkit-slider-thumb {
   border-radius: 3px; background: #fff; box-shadow: 0 0 4px #000a;
 }
 
+/* Presets */
+.link { background: none; border: none; padding: 0; color: rgb(var(--c)); font-size: 14px; }
+.presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.preset {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 18px;
+  border: 1px solid var(--line); background: transparent; font-size: 14px;
+}
+.preset.on { background: rgba(var(--c), .18); border-color: rgb(var(--c)); }
+.preset.add { border-style: dashed; color: var(--muted); }
+.preset .x { color: #e5484d; font-size: 16px; line-height: 1; }
+.name-row { display: flex; gap: 8px; }
+.name-row input {
+  flex: 1; min-width: 0; padding: 9px 12px;
+  border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--text); font: inherit;
+}
+.name-row button { padding: 0 14px; border-radius: 10px; border: none; background: rgb(var(--c)); color: var(--bg); font-weight: 600; }
+.name-row .cancel { background: var(--line); color: var(--text); }
+.hint { color: var(--muted); font-size: 13px; }
+
 .swatches { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 .swatches button { aspect-ratio: 1; border-radius: 50%; border: 2px solid transparent; padding: 0; }
 .swatches button.on { border-color: #fff; }

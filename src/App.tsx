@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, pieces, toLight, type Light, type RGB,
+  PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, pieces, toLight, type Light, type Preset, type RGB,
 } from './wled'
 import { desktop, getHost, setHost } from './platform'
 
@@ -11,6 +11,7 @@ const COLORS: RGB[] = [
 
 const FLAG: [RGB, RGB] = [[255, 200, 0], [0, 80, 255]]
 const FLAG_ID = -1
+const CINEMA_ID = -2
 const same = (a: RGB, b: RGB) => a.join() === b.join()
 const css = (c: RGB) => `rgb(${c})`
 
@@ -22,6 +23,8 @@ const STYLES: Style[] = [
   { id: FLAG_ID, name: 'Прапор', preview: 'linear-gradient(#0057b7 50%, #ffd700 50%)' },
   { id: 17, name: 'Мерехтіння', preview: '', colors: true, moving: true },
   { id: 67, name: 'Хвилі', preview: '', colors: true, moving: true },
+  // Painted by the desktop app from the screen; the controller shows the static colours meanwhile
+  { id: CINEMA_ID, name: 'Кіно', preview: 'linear-gradient(90deg, #1b3a6b, #c96a2b, #6b2b8c, #2b8c7a, #1b3a6b)', moving: true },
 ]
 
 const DEFAULT_COLS: Light['cols'] = [[255, 160, 60], [0, 80, 255], [255, 0, 120]]
@@ -87,13 +90,16 @@ function preview(s: Style, cols: RGB[]) {
 
 export function App() {
   const [light, setLight] = useState<Light>({
-    on: false, bri: 128, cols: DEFAULT_COLS, fx: 0, sx: 128, pal: 0, bounds: [], len: 166,
+    on: false, bri: 128, cols: DEFAULT_COLS, fx: 0, sx: 128, pal: 0, bounds: [], len: 166, ps: -1, cinema: false,
   })
   const [slot, setSlot] = useState(0)
   const [online, setOnline] = useState(false)
   const [host, setHostState] = useState<string>()
   const [editing, setEditing] = useState(false)
   const [picking, setPicking] = useState(false)
+  const [presets, setPresets] = useState<Preset[]>([])
+  const [naming, setNaming] = useState(false)
+  const [pruning, setPruning] = useState(false)
   const wled = useRef<Wled>(undefined)
   // Pushes from the controller lag behind a dragged slider; ignore them briefly
   const quietUntil = useRef(0)
@@ -110,8 +116,32 @@ export function App() {
       setOnline,
     )
     wled.current = w
+    w.presets().then(setPresets, () => {})
     return () => w.close()
   }, [host])
+
+  // The controller needs a moment to write presets to flash before the list is up to date
+  const reloadPresets = () => setTimeout(() => wled.current?.presets().then(setPresets, () => {}), 1500)
+
+  const savePreset = (name: string) => {
+    setNaming(false)
+    const used = new Set(presets.map((p) => p.id))
+    const id = Array.from({ length: 249 }, (_, i) => i + 1).find((i) => !used.has(i))
+    if (!id) return
+    wled.current?.savePreset(id, name.trim() || `Пресет ${presets.length + 1}`)
+    reloadPresets()
+  }
+
+  const removePreset = (id: number) => {
+    wled.current?.deletePreset(id)
+    setPresets((list) => {
+      const rest = list.filter((p) => p.id !== id)
+      // With nothing left to delete, go back to the normal view so "Save" shows again
+      if (!rest.length) setPruning(false)
+      return rest
+    })
+    reloadPresets()
+  }
 
   // Desktop popup sizes itself to the content
   useLayoutEffect(() => {
@@ -153,7 +183,7 @@ export function App() {
   const split = light.fx === STATIC && count > 1
   const bounds = light.bounds[count] ?? equalBounds(count, light.len)
   const isFlag = split && count === 2 && same(light.cols[0], FLAG[0]) && same(light.cols[1], FLAG[1])
-  const styleId = isFlag ? FLAG_ID : light.fx
+  const styleId = light.cinema ? CINEMA_ID : isFlag ? FLAG_ID : light.fx
   const style = STYLES.find((s) => s.id === styleId)
   const cols = light.cols.slice(0, count)
 
@@ -197,13 +227,15 @@ export function App() {
 
   const setFlag = () => {
     if (!isFlag) remember(light)
-    relayout({ fx: STATIC, pal: PAL_FOR_COUNT[2], cols: [FLAG[0], FLAG[1], light.cols[2]] })
+    relayout({ fx: STATIC, pal: PAL_FOR_COUNT[2], cols: [FLAG[0], FLAG[1], light.cols[2]], cinema: false })
   }
 
   const setStyle = (id: number) => {
     setPicking(false)
     if (id === FLAG_ID) return setFlag()
-    relayout({ fx: id, ...(isFlag ? recall() : {}) })
+    const own = isFlag ? recall() : {}
+    if (id === CINEMA_ID) relayout({ fx: STATIC, cinema: true, ...own })
+    else relayout({ fx: id, cinema: false, ...own })
   }
 
   // The anthem handler is registered once, so it reads the latest setFlag through a ref
@@ -236,7 +268,7 @@ export function App() {
   const current = light.cols[active]
   const colorful = Math.max(...current) - Math.min(...current) > 40
   const vars = { '--c': light.cols[0].join(',') } as React.CSSProperties
-  const showColors = !isFlag && (style?.colors ?? true)
+  const showColors = !isFlag && !light.cinema && (style?.colors ?? true)
   const pct = (v: number) => `${(v / light.len) * 100}%`
 
   if (picking) {
@@ -301,7 +333,8 @@ export function App() {
           <span className="label"><small>Стиль</small>{style?.name ?? 'Інший'}</span>
           <span className="chev">›</span>
         </button>
-        {style?.moving && (
+        {light.cinema && <small className="hint">Кольори бере програма на ПК з екрана, поки вона запущена</small>}
+        {style?.moving && !light.cinema && (
           <>
             <div className="row"><span>Швидкість</span></div>
             <input
@@ -309,6 +342,33 @@ export function App() {
               onChange={(e) => setSpeed(+e.target.value)}
             />
           </>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="row">
+          <span>Пресети</span>
+          {presets.length > 0 && (
+            <button className="link" onClick={() => setPruning((v) => !v)}>{pruning ? 'Готово' : 'Змінити'}</button>
+          )}
+        </div>
+        <div className="presets">
+          {presets.map((p) => (
+            <button
+              key={p.id} className={light.ps === p.id && !pruning ? 'preset on' : 'preset'}
+              onClick={() => (pruning ? removePreset(p.id) : wled.current?.send({ ps: p.id }))}
+            >
+              {p.name}{pruning && <span className="x" aria-label="Видалити">×</span>}
+            </button>
+          ))}
+          {!naming && !pruning && <button className="preset add" onClick={() => setNaming(true)}>+ Зберегти</button>}
+        </div>
+        {naming && (
+          <form className="name-row" onSubmit={(e) => { e.preventDefault(); savePreset(new FormData(e.currentTarget).get('name') as string) }}>
+            <input name="name" defaultValue={`Пресет ${presets.length + 1}`} autoFocus spellCheck={false} onFocus={(e) => e.target.select()} />
+            <button type="submit">OK</button>
+            <button type="button" className="cancel" onClick={() => setNaming(false)}>✕</button>
+          </form>
         )}
       </section>
 
