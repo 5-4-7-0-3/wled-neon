@@ -19,7 +19,7 @@ const css = (c: RGB) => `rgb(${c})`
 interface Style { id: number; name: string; preview: string; colors?: boolean; moving?: boolean }
 const STYLES: Style[] = [
   { id: STATIC, name: 'Статичний', preview: '', colors: true },
-  { id: FLAG_ID, name: 'Прапор', preview: 'linear-gradient(90deg, #0057b7 50%, #ffd700 50%)' },
+  { id: FLAG_ID, name: 'Прапор', preview: 'linear-gradient(#0057b7 50%, #ffd700 50%)' },
   { id: 17, name: 'Мерехтіння', preview: '', colors: true, moving: true },
   { id: 67, name: 'Хвилі', preview: '', colors: true, moving: true },
 ]
