@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld('neonDesktop', {
   setHost: (host) => ipcRenderer.invoke('host:set', host),
   resize: (height) => ipcRenderer.send('win:resize', height),
   hide: () => ipcRenderer.send('win:hide'),
+  onFlag: (cb) => ipcRenderer.on('flag', () => cb()),
 })

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Wled, toLight, type Light, type RGB } from './wled'
+import { PAL_FOR_COUNT, SEA, STATIC, Wled, countFromPal, equalBounds, layout, toLight, type Light, type RGB } from './wled'
 import { desktop, getHost, setHost } from './platform'
 
 const COLORS: RGB[] = [
@@ -7,9 +7,12 @@ const COLORS: RGB[] = [
   [0, 255, 0], [0, 255, 200], [0, 80, 255], [140, 0, 255], [255, 0, 120],
 ]
 
+const FLAG: [RGB, RGB] = [[255, 200, 0], [0, 80, 255]]
+const same = (a: RGB, b: RGB) => a.join() === b.join()
+
 // IDs from the controller's /json/eff list (WLED 0.15)
 const EFFECTS: [number, string][] = [
-  [0, 'Статичний'], [2, 'Дихання'], [88, 'Свічка'], [66, 'Вогонь'],
+  [STATIC, 'Статичний'], [SEA, 'Море'], [2, 'Дихання'], [88, 'Свічка'], [66, 'Вогонь'],
   [9, 'Веселка'], [38, 'Аврора'], [17, 'Мерехтіння'], [67, 'Хвилі'],
 ]
 
@@ -29,7 +32,7 @@ function rgbToHue([r, g, b]: RGB): number {
 }
 
 // Sends at most once per `ms`, always delivering the last value
-function useThrottle<T>(fn: (v: T) => void, ms = 80) {
+function useThrottle<T>(fn: (v: T) => void, ms = 100) {
   const last = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   return (v: T) => {
@@ -42,7 +45,10 @@ function useThrottle<T>(fn: (v: T) => void, ms = 80) {
 }
 
 export function App() {
-  const [light, setLight] = useState<Light>({ on: false, bri: 128, col: [255, 160, 60], fx: 0, sx: 128 })
+  const [light, setLight] = useState<Light>({
+    on: false, bri: 128, cols: [[255, 160, 60], [0, 80, 255], [255, 0, 120]], fx: 0, sx: 128, pal: 0, bounds: [], len: 166,
+  })
+  const [slot, setSlot] = useState(0)
   const [online, setOnline] = useState(false)
   const [host, setHostState] = useState<string>()
   const [editing, setEditing] = useState(false)
@@ -89,12 +95,57 @@ export function App() {
 
   const update = (next: Partial<Light>, patch: object, throttled = false) => {
     setLight((p) => ({ ...p, ...next }))
-    // tt:0 skips WLED's 0.7 s crossfade, which feels like lag while dragging a slider
-    throttled ? sendThrottled({ ...patch, tt: 0 }) : send(patch)
+    // While dragging, a 100 ms crossfade matches the send interval: the default 0.7 s
+    // fade restarts on every update and flickers, no fade at all looks steppy
+    throttled ? sendThrottled({ ...patch, tt: 1 }) : send(patch)
   }
 
-  const setColor = (col: RGB, throttled = false) =>
-    update({ col, on: true }, { on: true, seg: [{ col: [col] }] }, throttled)
+  const count = countFromPal(light.pal)
+  const active = Math.min(slot, count - 1)
+  const split = light.fx === STATIC && count > 1
+  const bounds = light.bounds[count] ?? equalBounds(count, light.len)
+
+  const relayout = (next: Partial<Light>, throttled = false) => {
+    const l = { ...light, ...next }
+    const seg = layout(l, countFromPal(l.pal))
+    update({ ...next, on: true }, { on: true, seg }, throttled)
+  }
+
+  const setColor = (col: RGB, throttled = false) => {
+    const cols = light.cols.map((c, i) => (i === active ? col : c)) as Light['cols']
+    // Split parts may be cut in two at the strip's end, so the whole layout is resent
+    if (split) relayout({ cols }, throttled)
+    else update({ cols, on: true }, { on: true, seg: [{ id: 0, col: cols }] }, throttled)
+  }
+
+  const setCount = (n: number) => {
+    // Extra slots start black on the controller; give them a visible colour
+    const cols = light.cols.map((c, i) =>
+      i > 0 && i < n && Math.max(...c) === 0 ? hsvToRgb((rgbToHue(light.cols[0]) + 120 * i) % 360) : c,
+    ) as Light['cols']
+    setSlot((s) => Math.min(s, n - 1))
+    relayout({ cols, pal: PAL_FOR_COUNT[n] })
+  }
+
+  const setFx = (fx: number) => relayout({ fx })
+
+  const setFlag = () =>
+    relayout({ fx: STATIC, pal: PAL_FOR_COUNT[2], cols: [FLAG[0], FLAG[1], light.cols[2]] })
+  const isFlag = split && count === 2 && same(light.cols[0], FLAG[0]) && same(light.cols[1], FLAG[1])
+
+  // The anthem handler is registered once, so it reads the latest setFlag through a ref
+  const flagRef = useRef(setFlag)
+  flagRef.current = setFlag
+  useEffect(() => desktop?.onFlag(() => flagRef.current()), [])
+
+  // Each boundary stays between its neighbours so the colours keep their order
+  const setBound = (i: number, v: number) => {
+    const b = [...bounds]
+    b[i] = Math.max(i ? b[i - 1] + 1 : 0, Math.min(v, i + 1 < count ? b[i + 1] - 1 : light.len - 1))
+    const all = [...light.bounds]
+    all[count] = b
+    relayout({ bounds: all }, true)
+  }
 
   const saveHost = (value: string) => {
     const h = value.trim()
@@ -103,8 +154,9 @@ export function App() {
     setHost(h).then(() => setHostState(h))
   }
 
-  const colorful = Math.max(...light.col) - Math.min(...light.col) > 40
-  const style = { '--c': light.col.join(',') } as React.CSSProperties
+  const current = light.cols[active]
+  const colorful = Math.max(...current) - Math.min(...current) > 40
+  const style = { '--c': light.cols[0].join(',') } as React.CSSProperties
 
   return (
     <main ref={root} className={light.on ? 'panel' : 'panel off'} style={style}>
@@ -142,17 +194,49 @@ export function App() {
       </section>
 
       <section className="card">
-        <div className="row"><span>Колір</span></div>
+        <div className="row">
+          <span>{count === 1 ? 'Колір' : 'Кольори'}</span>
+          <div className="seg-ctl" role="group" aria-label="Кількість кольорів">
+            {[1, 2, 3].map((n) => (
+              <button key={n} className={n === count ? 'on' : ''} onClick={() => setCount(n)}>{n}</button>
+            ))}
+          </div>
+        </div>
+        {count > 1 && (
+          <div className="slots">
+            {light.cols.slice(0, count).map((c, i) => (
+              <button
+                key={i} aria-label={`Колір ${i + 1}`}
+                className={i === active ? 'on' : ''}
+                style={{ background: `rgb(${c})` }}
+                onClick={() => setSlot(i)}
+              >{i + 1}</button>
+            ))}
+          </div>
+        )}
+        {split && (
+          <>
+            {bounds.map((b, i) => (
+              <div key={i} className="bound">
+                <div className="row"><span>Межа {i + 1}</span><span>{b + 1}</span></div>
+                <input
+                  type="range" min={0} max={light.len - 1} value={b}
+                  onChange={(e) => setBound(i, +e.target.value)}
+                />
+              </div>
+            ))}
+          </>
+        )}
         <input
           className="hue" type="range" min={0} max={359}
-          value={colorful ? rgbToHue(light.col) : 0}
+          value={colorful ? rgbToHue(current) : 0}
           onChange={(e) => setColor(hsvToRgb(+e.target.value), true)}
         />
         <div className="swatches">
           {COLORS.map((c) => (
             <button
               key={c.join()} aria-label="Колір" style={{ background: `rgb(${c})` }}
-              className={c.join() === light.col.join() ? 'on' : ''}
+              className={c.join() === current.join() ? 'on' : ''}
               onClick={() => setColor(c)}
             />
           ))}
@@ -163,18 +247,18 @@ export function App() {
         <div className="row"><span>Режим</span></div>
         <div className="effects">
           {EFFECTS.map(([id, name]) => (
-            <button
-              key={id} className={id === light.fx ? 'on' : ''}
-              onClick={() => update({ fx: id, on: true }, { on: true, seg: [{ fx: id }] })}
-            >{name}</button>
+            <button key={id} className={id === light.fx && !isFlag ? 'on' : ''} onClick={() => setFx(id)}>
+              {name}
+            </button>
           ))}
+          <button className={isFlag ? 'flag on' : 'flag'} onClick={setFlag}>Прапор</button>
         </div>
-        {light.fx !== 0 && (
+        {light.fx !== STATIC && (
           <>
             <div className="row"><span>Швидкість</span></div>
             <input
               type="range" min={0} max={255} value={light.sx}
-              onChange={(e) => update({ sx: +e.target.value }, { seg: [{ sx: +e.target.value }] }, true)}
+              onChange={(e) => relayout({ sx: +e.target.value }, true)}
             />
           </>
         )}

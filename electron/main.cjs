@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const { spawn } = require('node:child_process')
 const { ringIcon } = require('./icon.cjs')
 
 if (!app.requestSingleInstanceLock()) app.quit()
@@ -10,7 +11,7 @@ const START_HIDDEN = process.argv.includes('--hidden')
 const WIDTH = 360
 
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json')
-let cfg = { host: '192.168.1.12', autostartSet: false }
+let cfg = { host: '192.168.1.12', autostartSet: false, anthem: true }
 
 function loadConfig() {
   try {
@@ -65,6 +66,64 @@ function send(patch) {
   }).catch(() => {})
 }
 
+// ---- Anthem: show the flag while the Ukrainian anthem plays ----
+
+const ANTHEM = /гімн україни|гимн украины|ще не вмерла|national anthem of ukraine|ukrainian national anthem|anthem of ukraine|shche ne vmerla/i
+let media, anthemOn = false, anthemSeen = 0, beforeAnthem
+
+function watchMedia() {
+  // PowerShell cannot run a script from inside app.asar, so pass it inline
+  const script = fs.readFileSync(path.join(__dirname, 'media.ps1'), 'utf8')
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  media = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true })
+  let buf = ''
+  media.stdout.setEncoding('utf8')
+  media.stdout.on('data', (chunk) => {
+    buf += chunk
+    const lines = buf.split(/\r?\n/)
+    buf = lines.pop()
+    for (const line of lines) onMedia(line)
+  })
+  media.on('exit', () => { if (!app.isQuitting) setTimeout(watchMedia, 5000) })
+}
+
+function onMedia(line) {
+  let sessions
+  try {
+    sessions = JSON.parse(line)
+  } catch {
+    return
+  }
+  const playing = [].concat(sessions ?? []).some((s) => s.playing && ANTHEM.test(`${s.title} ${s.artist}`))
+  if (playing) anthemSeen = Date.now()
+  if (playing && !anthemOn && cfg.anthem && online) startAnthem()
+  // A short pause or a track switch should not flip the light back and forth
+  if (!playing && anthemOn && Date.now() - anthemSeen > 3000) stopAnthem()
+}
+
+// The light before the anthem is kept in memory: saving a preset writes the controller's
+// flash, which stalls it for several seconds and delays the flag
+async function startAnthem() {
+  anthemOn = true
+  try {
+    beforeAnthem = await (await fetch(`http://${cfg.host}/json/state`)).json()
+  } catch {
+    beforeAnthem = undefined
+  }
+  win?.webContents.send('flag')
+}
+
+function stopAnthem() {
+  anthemOn = false
+  if (!beforeAnthem) return
+  const { on, bri, seg = [] } = beforeAnthem
+  const restored = seg.map((g) => ({ ...g, frz: false }))
+  // Segments added for the flag must go, otherwise they stay over the restored layout
+  for (let id = seg.length; id < 4; id++) restored.push({ id, stop: 0 })
+  send({ on, bri, seg: restored })
+  beforeAnthem = undefined
+}
+
 // ---- Tray ----
 
 function trayImage() {
@@ -85,10 +144,17 @@ function trayMenu() {
     { label: light.on ? 'Вимкнути' : 'Увімкнути', enabled: online, click: () => send({ on: !light.on }) },
     { label: 'Відкрити панель', click: showWindow },
     { type: 'separator' },
+    { label: 'Прапор під гімн України', type: 'checkbox', checked: cfg.anthem, click: (i) => setAnthem(i.checked) },
     { label: 'Запускати з Windows', type: 'checkbox', checked: autostart, click: (i) => setAutostart(i.checked) },
     { type: 'separator' },
-    { label: 'Вихід', click: () => app.exit(0) },
+    { label: 'Вихід', click: quit },
   ])
+}
+
+function setAnthem(enabled) {
+  cfg.anthem = enabled
+  saveConfig()
+  if (!enabled && anthemOn) stopAnthem()
 }
 
 function setAutostart(enabled) {
@@ -108,7 +174,8 @@ function createWindow() {
     alwaysOnTop: true,
     transparent: true,
     backgroundColor: '#00000000',
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs') },
+    // The hidden popup still has to switch to the flag right away when the anthem starts
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), backgroundThrottling: false },
   })
   if (DEV_URL) win.loadURL(DEV_URL)
   else win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
@@ -164,6 +231,12 @@ ipcMain.on('win:hide', () => win.hide())
 
 // ---- App lifecycle ----
 
+function quit() {
+  app.isQuitting = true
+  media?.kill()
+  app.exit(0)
+}
+
 app.on('second-instance', showWindow)
 app.on('window-all-closed', (e) => e.preventDefault())
 
@@ -185,5 +258,6 @@ app.whenReady().then(() => {
 
   createWindow()
   connect()
+  watchMedia()
   if (!START_HIDDEN) win.once('ready-to-show', showWindow)
 })

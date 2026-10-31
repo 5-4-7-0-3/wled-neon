@@ -4,6 +4,8 @@ interface DesktopBridge {
   setHost(host: string): Promise<void>
   resize(height: number): void
   hide(): void
+  // Fired by the main process when the Ukrainian anthem starts playing
+  onFlag(cb: () => void): void
 }
 
 declare global {
