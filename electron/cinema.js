@@ -6,7 +6,11 @@
 const W = 64
 const H = 36
 const FPS = 30
-const SMOOTH = 0.35 // share of the new frame per tick; lower is calmer, higher follows cuts faster
+// Share of the new frame taken per tick. Small changes (motion, grain, flicker) move slowly so the
+// walls stay calm; a big jump is a scene cut and is followed quickly to stay in sync with the film.
+const SMOOTH_CALM = 0.08 // small changes need about 0.4 s to get two thirds of the way
+const SMOOTH_CUT = 0.4
+const CUT = 60 // colour jump that counts as a cut
 const BACK = 0.15
 const ABOVE_BED = 0.05
 const SIDE_FADE = 0.65
@@ -95,7 +99,9 @@ async function start() {
     // the dim tones film scenes are made of
     const rgb = new Uint8Array(room.len * 3)
     for (let i = 0; i < out.length; i++) {
-      out[i] += (target[i] - out[i]) * SMOOTH
+      const d = target[i] - out[i]
+      const k = SMOOTH_CALM + (SMOOTH_CUT - SMOOTH_CALM) * Math.min(1, Math.abs(d) / CUT)
+      out[i] += d * k
       rgb[i] = Math.round(255 * Math.pow(out[i] / 255, GAMMA))
     }
     window.cinema.frame(rgb)
