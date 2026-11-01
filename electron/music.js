@@ -3,8 +3,8 @@
 // beat (stronger hits make wider, faster waves); the tempo is tracked so the rhythm carries on
 // through quiet hits and the colour steps on every bar. A drop flashes the whole room, the mids
 // keep a soft glow breathing, the highs flash as sparks, and a soft ribbon of light drifts round
-// the room while someone sings. The colour follows where the sound sits: bass-heavy music goes
-// deep blue and violet, bright music warm.
+// the room while someone sings. The colours come from the genre, rap styles included: looked up
+// from the track's artist or title when possible, otherwise guessed from the sound itself.
 
 const FPS = 60
 const GLOW = 0.24
@@ -16,6 +16,50 @@ const TEMPO_WINDOW = 6 // seconds of rhythm used to find the tempo
 const RIBBON = 0.32
 const RIBBON_WIDTH = 14
 const RIBBON_SPEED = 6 // LEDs per second
+
+// Two hues per genre: beats alternate between them and bars swap which one leads
+const PALETTES = {
+  electro: [185, 300],
+  hiphop: [275, 45],
+  trap: [275, 350],
+  drill: [220, 190],
+  boombap: [42, 22],
+  cloud: [320, 270],
+  phonk: [350, 285],
+  lofi: [35, 175],
+  rock: [0, 28],
+  metal: [350, 205],
+  pop: [330, 15],
+  rnb: [285, 35],
+  jazz: [35, 225],
+  classical: [45, 175],
+  latin: [120, 55],
+  folk: [30, 95],
+  chill: [175, 220],
+}
+
+// Rough genre from how the music sounds, over the last ten seconds or so
+function guessGenre({ bpm, steady, bassShare, brightness, loudness }) {
+  if (loudness < 0.06 || steady < 0.15) return 'chill'
+  if (bassShare > 0.5 && (bpm < 100 || bpm > 135) && brightness < 0.45) return 'hiphop'
+  if (steady > 0.45 && bpm >= 115 && bpm <= 135 && bassShare > 0.38) return 'electro'
+  if (brightness > 0.55 && loudness > 0.18) return 'rock'
+  return 'pop'
+}
+
+// Rap style from the sound, for when only "hip hop" is known: half-time trap around 130-160 BPM,
+// laid-back boom bap around 85-100 with little sub-bass, quiet even lo-fi, and vocal-led
+// melodic rap with soft drums
+function guessRap({ bpm, steady, bassShare, brightness, loudness, vocal }) {
+  if (loudness < 0.1 && steady > 0.3) return 'lofi'
+  if (vocal > 0.5 && bassShare < 0.45) return 'cloud'
+  if (bpm >= 82 && bpm <= 100 && bassShare < 0.45) return 'boombap'
+  if (bassShare > 0.55 && brightness < 0.35) return 'phonk'
+  return 'trap'
+}
+
+// Shortest way round the colour wheel, so a palette change does not sweep through every hue
+const towards = (from, to, k) => from + ((((to - from) % 360) + 540) % 360 - 180) * k
 
 function hsv(h, s, v) {
   const f = (n) => {
@@ -97,8 +141,11 @@ async function start() {
   let lastBeat = 0, lastDrop = 0, flash = 0, flashHue = 0
   let shortE = 0, longE = 0, tone = 0.5
   let period = 500, confidence = 0, nextGrid = 0, beatNo = 0, gridHit = false
-  let barShift = 0, barTarget = 0, voice = 0, ribbonPos = Math.random() * room.len
+  let barTarget = 0, voice = 0, ribbonPos = Math.random() * room.len
   let frame = 0, t0 = performance.now()
+  let named = null, style = 'pop', hueA = 200, hueB = 300
+  const feel = { bassShare: 0.4, brightness: 0.5, loudness: 0.1, vocal: 0.3 }
+  window.live.onGenre((g) => { named = g })
 
   const wave = (now, power, hue) => {
     waves.push({
@@ -131,8 +178,26 @@ async function start() {
     const centroid = sum ? w / sum : 500
     const t = Math.min(1, Math.max(0, Math.log(centroid / 150) / Math.log(4000 / 150)))
     tone += (t - tone) * 0.03
-    barShift += (barTarget - barShift) * 0.08
-    const hue = 260 - tone * 240 + barShift
+
+    // How the music feels over roughly ten seconds, for guessing the genre without a title
+    const ease = 0.003
+    feel.bassShare += ((energy ? bassRaw / (3 * energy) : 0) - feel.bassShare) * ease
+    feel.brightness += (t - feel.brightness) * ease
+    feel.loudness += (energy - feel.loudness) * ease
+    feel.vocal += (voice - feel.vocal) * ease
+    if (frame % (FPS * 2) === 0) {
+      const sound = { bpm: 60000 / period, steady: confidence, ...feel }
+      const base = named ?? guessGenre(sound)
+      style = base === 'hiphop' ? guessRap(sound) : base
+    }
+    const [pa, pb] = PALETTES[style]
+    // Bars swap the two hues, so the room changes colour on the bar
+    const lead = (barTarget / BAR_STEP) % 2 ? [pb, pa] : [pa, pb]
+    hueA = towards(hueA, lead[0], 0.05)
+    hueB = towards(hueB, lead[1], 0.05)
+    // The brightness of the sound nudges both hues a little, so the colours still breathe
+    const nudge = (tone - 0.5) * 20
+    const hue = hueA + nudge
 
     // Tempo, re-estimated four times a second
     rhythm.push(bassFlux)
@@ -155,13 +220,13 @@ async function start() {
       // A hit close to where the grid expected one pulls the grid onto the music
       if (Math.abs(now - nextGrid) < period * 0.25 || !steady) nextGrid = now
       gridHit = true
-      wave(now, Math.min(1, 0.4 + bass * 0.6), (hue + (Math.random() - 0.5) * 30 + 360) % 360)
+      wave(now, Math.min(1, 0.4 + bass * 0.6), (beatNo % 2 ? hueA : hueB) + nudge + (Math.random() - 0.5) * 16)
     }
 
     // The beat grid keeps the rhythm going: it counts beats and bars, and fills in a soft wave
     // on a beat the detector missed
     if (now >= nextGrid) {
-      if (steady && !gridHit && now - lastBeat > period * 0.5) wave(now, 0.3, hue)
+      if (steady && !gridHit && now - lastBeat > period * 0.5) wave(now, 0.3, beatNo % 2 ? hueA : hueB)
       gridHit = false
       beatNo++
       if (beatNo % 4 === 0) barTarget += BAR_STEP
@@ -186,7 +251,7 @@ async function start() {
     voice += (Math.max(0, vocal - 0.45) / 0.55 - voice) * 0.06
     ribbonPos = (ribbonPos + RIBBON_SPEED * dt) % room.len
 
-    const g = hsv(hue + 35, 0.7, quiet ? 0 : GLOW * (0.2 + 0.8 * mid))
+    const g = hsv(hueB + nudge, 0.7, quiet ? 0 : GLOW * (0.2 + 0.8 * mid))
     for (let k = 0; k < 3; k++) glow[k] += (g[k] - glow[k]) * 0.12
 
     // Sparks: random LEDs flash with the highs and fade quickly
@@ -203,7 +268,7 @@ async function start() {
 
       const rd = Math.min(Math.abs(v - ribbonPos), room.len - Math.abs(v - ribbonPos)) / RIBBON_WIDTH
       if (voice > 0.01 && rd < 2) {
-        const c = hsv(hue + 180, 0.35, RIBBON * voice * Math.exp(-rd * rd))
+        const c = hsv(hue, 0.25, RIBBON * voice * Math.exp(-rd * rd))
         r = Math.max(r, c[0]); gg = Math.max(gg, c[1]); b = Math.max(b, c[2])
       }
 

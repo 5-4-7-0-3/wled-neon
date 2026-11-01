@@ -109,6 +109,7 @@ function setLive(mode) {
     },
   })
   liveWin.loadFile(path.join(__dirname, `${mode}.html`))
+  liveWin.webContents.on('did-finish-load', () => liveWin?.webContents.send('live:genre', genre))
 }
 
 ipcMain.handle('live:room', () => ROOM)
@@ -117,6 +118,133 @@ ipcMain.on('live:frame', (_e, rgb) => {
   // WLED "DRGB" realtime packet: protocol 2, then seconds to hold the frame if the stream stops
   udp.send(Buffer.concat([Buffer.from([2, 2]), Buffer.from(rgb)]), 21324, cfg.host)
 })
+
+// ---- Genre of the playing track, for the music mode's colours ----
+
+// Rap styles, checked against an artist's tags in the order the tags are ranked
+const RAP_STYLES = [
+  [/phonk/i, 'phonk'],
+  [/drill/i, 'drill'],
+  [/lo-?fi|chillhop|instrumental hip.?hop/i, 'lofi'],
+  [/cloud rap|emo|melodic rap|pop rap/i, 'cloud'],
+  [/boom.?bap|east coast|golden age|conscious|jazz rap|hardcore hip.?hop/i, 'boombap'],
+  [/trap|southern hip.?hop|crunk/i, 'trap'],
+]
+const RAP = /hip.?hop|rap/i
+
+// Genre names (Deezer's and MusicBrainz') folded into the palettes the music mode knows
+const GENRES = [
+  [/metal/i, 'metal'],
+  [/electro|dance|techno|house|edm|trance|drum/i, 'electro'],
+  [/rap|hip.?hop|trap/i, 'hiphop'],
+  [/r&b|soul|funk/i, 'rnb'],
+  [/rock|alternative|indie|punk/i, 'rock'],
+  [/jazz|blues/i, 'jazz'],
+  [/classical|film|games|score|soundtrack/i, 'classical'],
+  [/reggae|latin|reggaeton|african/i, 'latin'],
+  [/folk|country|acoustic/i, 'folk'],
+  [/ambient|chill|lounge|relax|new age/i, 'chill'],
+  [/pop/i, 'pop'],
+]
+
+let trackKey, genre = null
+const genreCache = new Map()
+const artistCache = new Map()
+
+// Video titles carry noise like "(Official Video)" or "| Lyrics"; channel names end in VEVO or
+// " - Topic". Searching with that left in finds nothing.
+function searchText({ title, artist }) {
+  const clean = (t) => t
+    .replace(/\(.*?\)|\[.*?\]|【.*?】/g, ' ')
+    .replace(/\|.*$/, ' ')
+    .replace(/\b(official|music video|video|lyrics?|audio|hd|4k|remaster(ed)?)\b/gi, ' ')
+    .replace(/\s(ft|feat)\.?\s.*$/i, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const channel = clean((artist ?? '').replace(/vevo$|\s-\stopic$/i, ''))
+  const what = clean(title ?? '')
+  // "Artist - Title" in the title names the artist better than the channel does
+  const [named, song] = what.includes(' - ') ? what.split(' - ', 2) : [channel, what]
+  const who = named.split(/,|&|\sx\s/i)[0].trim()
+  return { who, text: who ? `${who} ${song}` : song }
+}
+
+// MusicBrainz: community genres and tags of the artist, which name rap styles that Deezer
+// lumps together. Its rules ask for a descriptive User-Agent and at most one request a second.
+const MB = { headers: { 'User-Agent': 'Neon/0.1 (https://github.com/5-4-7-0-3/wled-neon)' } }
+let mbQueue = Promise.resolve()
+
+const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+
+// Requests go one after another with a gap, and a busy reply (503) is tried once more after a
+// pause; a refusal throws so it is not cached as "no genre"
+function mb(url) {
+  const call = mbQueue.then(async () => {
+    let res = await fetch(url, MB)
+    if (res.status === 503) {
+      await wait(3000)
+      res = await fetch(url, MB)
+    }
+    if (!res.ok) throw new Error(`MusicBrainz ${res.status}`)
+    return res.json()
+  })
+  mbQueue = call.catch(() => {}).then(() => wait(1500))
+  return call
+}
+
+async function artistGenre(who) {
+  if (!who) return null
+  if (artistCache.has(who)) return artistCache.get(who)
+  const found = await mb(`https://musicbrainz.org/ws/2/artist/?fmt=json&limit=1&query=${encodeURIComponent(`artist:"${who}"`)}`)
+  const hit = found.artists?.[0]
+  let result = null
+  if (hit && hit.score >= 90) {
+    const info = await mb(`https://musicbrainz.org/ws/2/artist/${hit.id}?fmt=json&inc=genres+tags`)
+    const tags = [...(info.genres ?? []), ...(info.tags ?? [])].sort((a, b) => b.count - a.count).map((t) => t.name)
+    const style = tags.map((t) => RAP_STYLES.find(([re]) => re.test(t))?.[1]).find(Boolean)
+    if (style) result = style
+    else if (tags.some((t) => RAP.test(t))) result = 'hiphop'
+    else result = tags.map((t) => GENRES.find(([re]) => re.test(t))?.[1]).find(Boolean) ?? null
+  }
+  artistCache.set(who, result)
+  return result
+}
+
+async function deezerGenre(text) {
+  const found = await fetch(`https://api.deezer.com/search?limit=1&q=${encodeURIComponent(text)}`).then((r) => r.json())
+  const album = found.data?.[0]?.album?.id
+  if (!album) return null
+  const info = await fetch(`https://api.deezer.com/album/${album}`).then((r) => r.json())
+  const names = (info.genres?.data ?? []).map((g) => g.name).join(' ')
+  return GENRES.find(([re]) => re.test(names))?.[1] ?? null
+}
+
+function lookUpGenre(session) {
+  const q = session ? searchText(session) : { who: '', text: '' }
+  const key = q.text
+  if (key === trackKey) return
+  trackKey = key
+  const done = (g) => {
+    if (key !== trackKey) return
+    genre = g
+    liveWin?.webContents.send('live:genre', genre)
+  }
+  if (!key) return done(null)
+  if (genreCache.has(key)) return done(genreCache.get(key))
+  // The artist's style first; a track's album genre from Deezer when the artist is unknown there.
+  // When MusicBrainz refused, the answer is only a stand-in and the track is asked about again.
+  let refused = false
+  artistGenre(q.who)
+    .catch(() => { refused = true; return null })
+    .then((g) => g ?? deezerGenre(key))
+    .then((g) => {
+      if (!refused) genreCache.set(key, g)
+      // Forgetting the track makes the next media update look it up again
+      else setTimeout(() => { if (trackKey === key) trackKey = undefined }, 30000)
+      done(g)
+    })
+    .catch(() => done(null))
+}
 
 // ---- Anthem: show the flag while the Ukrainian anthem plays ----
 
@@ -146,7 +274,9 @@ function onMedia(line) {
   } catch {
     return
   }
-  const playing = [].concat(sessions ?? []).some((s) => s.playing && ANTHEM.test(`${s.title} ${s.artist}`))
+  sessions = [].concat(sessions ?? [])
+  if (liveMode === 'music') lookUpGenre(sessions.find((s) => s.playing && s.title))
+  const playing = sessions.some((s) => s.playing && ANTHEM.test(`${s.title} ${s.artist}`))
   if (playing) anthemSeen = Date.now()
   if (playing && !anthemOn && cfg.anthem && online) startAnthem()
   // A short pause or a track switch should not flip the light back and forth
