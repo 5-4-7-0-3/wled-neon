@@ -29,7 +29,7 @@ function tone([r, g, b], k = 1.35) {
 }
 
 async function start() {
-  const room = await window.cinema.room()
+  const room = await window.live.room()
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: FPS, width: 640, height: 360 },
     audio: false,
@@ -104,7 +104,7 @@ async function start() {
       out[i] += d * k
       rgb[i] = Math.round(255 * Math.pow(out[i] / 255, GAMMA))
     }
-    window.cinema.frame(rgb)
+    window.live.frame(rgb)
   }
   setInterval(tick, 1000 / FPS)
 }

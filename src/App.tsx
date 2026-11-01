@@ -12,6 +12,7 @@ const COLORS: RGB[] = [
 const FLAG: [RGB, RGB] = [[255, 200, 0], [0, 80, 255]]
 const FLAG_ID = -1
 const CINEMA_ID = -2
+const MUSIC_ID = -3
 const same = (a: RGB, b: RGB) => a.join() === b.join()
 const css = (c: RGB) => `rgb(${c})`
 
@@ -25,6 +26,7 @@ const STYLES: Style[] = [
   { id: 67, name: 'Хвилі', preview: '', colors: true, moving: true },
   // Painted by the desktop app from the screen; the controller shows the static colours meanwhile
   { id: CINEMA_ID, name: 'Кіно', preview: 'linear-gradient(90deg, #1b3a6b, #c96a2b, #6b2b8c, #2b8c7a, #1b3a6b)', moving: true },
+  { id: MUSIC_ID, name: 'Музика', preview: 'radial-gradient(circle at 50% 50%, #ff2bd6 0 12%, #2b1bff 30%, #0b0b25 55%, #ff8a00 75%, #0b0b25 90%)', moving: true },
 ]
 
 const DEFAULT_COLS: Light['cols'] = [[255, 160, 60], [0, 80, 255], [255, 0, 120]]
@@ -90,7 +92,7 @@ function preview(s: Style, cols: RGB[]) {
 
 export function App() {
   const [light, setLight] = useState<Light>({
-    on: false, bri: 128, cols: DEFAULT_COLS, fx: 0, sx: 128, pal: 0, bounds: [], len: 166, ps: -1, cinema: false,
+    on: false, bri: 128, cols: DEFAULT_COLS, fx: 0, sx: 128, pal: 0, bounds: [], len: 166, ps: -1, live: null,
   })
   const [slot, setSlot] = useState(0)
   const [online, setOnline] = useState(false)
@@ -183,7 +185,7 @@ export function App() {
   const split = light.fx === STATIC && count > 1
   const bounds = light.bounds[count] ?? equalBounds(count, light.len)
   const isFlag = split && count === 2 && same(light.cols[0], FLAG[0]) && same(light.cols[1], FLAG[1])
-  const styleId = light.cinema ? CINEMA_ID : isFlag ? FLAG_ID : light.fx
+  const styleId = light.live === 'cinema' ? CINEMA_ID : light.live === 'music' ? MUSIC_ID : isFlag ? FLAG_ID : light.fx
   const style = STYLES.find((s) => s.id === styleId)
   const cols = light.cols.slice(0, count)
 
@@ -227,15 +229,16 @@ export function App() {
 
   const setFlag = () => {
     if (!isFlag) remember(light)
-    relayout({ fx: STATIC, pal: PAL_FOR_COUNT[2], cols: [FLAG[0], FLAG[1], light.cols[2]], cinema: false })
+    relayout({ fx: STATIC, pal: PAL_FOR_COUNT[2], cols: [FLAG[0], FLAG[1], light.cols[2]], live: null })
   }
 
   const setStyle = (id: number) => {
     setPicking(false)
     if (id === FLAG_ID) return setFlag()
     const own = isFlag ? recall() : {}
-    if (id === CINEMA_ID) relayout({ fx: STATIC, cinema: true, ...own })
-    else relayout({ fx: id, cinema: false, ...own })
+    if (id === CINEMA_ID) relayout({ fx: STATIC, live: 'cinema', ...own })
+    else if (id === MUSIC_ID) relayout({ fx: STATIC, live: 'music', ...own })
+    else relayout({ fx: id, live: null, ...own })
   }
 
   // The anthem handler is registered once, so it reads the latest setFlag through a ref
@@ -268,7 +271,7 @@ export function App() {
   const current = light.cols[active]
   const colorful = Math.max(...current) - Math.min(...current) > 40
   const vars = { '--c': light.cols[0].join(',') } as React.CSSProperties
-  const showColors = !isFlag && !light.cinema && (style?.colors ?? true)
+  const showColors = !isFlag && !light.live && (style?.colors ?? true)
   const pct = (v: number) => `${(v / light.len) * 100}%`
 
   if (picking) {
@@ -333,8 +336,12 @@ export function App() {
           <span className="label"><small>Стиль</small>{style?.name ?? 'Інший'}</span>
           <span className="chev">›</span>
         </button>
-        {light.cinema && <small className="hint">Кольори бере програма на ПК з екрана, поки вона запущена</small>}
-        {style?.moving && !light.cinema && (
+        {light.live && (
+          <small className="hint">
+            {light.live === 'cinema' ? 'Кольори бере програма на ПК з екрана' : 'Програма на ПК малює під звук, який грає комп’ютер'}, поки вона запущена
+          </small>
+        )}
+        {style?.moving && !light.live && (
           <>
             <div className="row"><span>Швидкість</span></div>
             <input

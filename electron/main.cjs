@@ -59,9 +59,8 @@ function connect() {
       if (!s) return
       light = { on: s.on, col: s.seg?.[0]?.col?.[0]?.slice(0, 3) ?? light.col }
       refreshTray()
-      const cinema = s.on && (s.seg?.[0]?.n ?? '').split(';').includes('cinema')
-      if (cinema && !cinemaWin) startCinema()
-      if (!cinema && cinemaWin) stopCinema()
+      const mode = s.on ? (s.seg?.[0]?.n ?? '').split(';').find((t) => LIVE_MODES.includes(t)) : undefined
+      if (mode !== liveMode) setLive(mode)
     } catch {
       // Non-JSON frames are not state updates
     }
@@ -82,30 +81,38 @@ function send(patch) {
   }).catch(() => {})
 }
 
-// ---- Cinema: paint the room from the screen ----
+// ---- Live modes: paint the room from the screen (cinema) or the sound (music) ----
 
-let cinemaWin, udp
+// Each mode is a hidden window (electron/<mode>.html) that streams finished frames back here
+const LIVE_MODES = ['cinema', 'music']
+let liveMode, liveWin, udp
 
-function startCinema() {
-  udp = dgram.createSocket('udp4')
-  cinemaWin = new BrowserWindow({
-    show: false,
-    webPreferences: { preload: path.join(__dirname, 'cinema-preload.cjs'), backgroundThrottling: false },
-  })
-  cinemaWin.loadFile(path.join(__dirname, 'cinema.html'))
-}
-
-function stopCinema() {
-  cinemaWin?.destroy()
-  cinemaWin = undefined
+function setLive(mode) {
+  liveWin?.destroy()
+  liveWin = undefined
   udp?.close()
   udp = undefined
-  // Leave realtime mode right away instead of waiting for the controller's timeout
-  send({ live: false })
+  liveMode = mode
+  if (!mode) {
+    // Leave realtime mode right away instead of waiting for the controller's timeout
+    send({ live: false })
+    return
+  }
+  udp = dgram.createSocket('udp4')
+  liveWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'live-preload.cjs'),
+      backgroundThrottling: false,
+      // Nobody clicks in a hidden window, and the music mode's audio must start on its own
+      autoplayPolicy: 'no-user-gesture-required',
+    },
+  })
+  liveWin.loadFile(path.join(__dirname, `${mode}.html`))
 }
 
-ipcMain.handle('cinema:room', () => ROOM)
-ipcMain.on('cinema:frame', (_e, rgb) => {
+ipcMain.handle('live:room', () => ROOM)
+ipcMain.on('live:frame', (_e, rgb) => {
   if (!udp) return
   // WLED "DRGB" realtime packet: protocol 2, then seconds to hold the frame if the stream stops
   udp.send(Buffer.concat([Buffer.from([2, 2]), Buffer.from(rgb)]), 21324, cfg.host)
@@ -289,9 +296,12 @@ app.whenReady().then(() => {
   app.setAppUserModelId('com.vladk.neon')
   loadConfig()
 
-  // Cinema mode captures the main screen without asking each time
-  session.defaultSession.setDisplayMediaRequestHandler((_req, callback) => {
-    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => callback({ video: sources[0] }), () => callback(null))
+  // Live modes capture the main screen, and music the system sound, without asking each time
+  session.defaultSession.setDisplayMediaRequestHandler((req, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then(
+      (sources) => callback({ video: sources[0], ...(req.audioRequested ? { audio: 'loopback' } : {}) }),
+      () => callback(null),
+    )
   })
 
   // Launching with Windows is on by default; the tray menu can switch it off
