@@ -101,6 +101,17 @@ async function start() {
   const room = await window.live.room()
   // Windows only hands out the system sound together with a screen capture; the video is dropped
   const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+  // The system sound is captured from the output that was the default when capture started.
+  // Switching to other speakers or headphones leaves it listening to silence, so capture is
+  // started over: right away when the devices change, or when media plays but nothing is heard.
+  let restarting = false
+  const restart = () => {
+    if (restarting) return
+    restarting = true
+    setTimeout(() => location.reload(), 1000)
+  }
+  navigator.mediaDevices.addEventListener('devicechange', restart)
+  stream.getAudioTracks().forEach((t) => t.addEventListener('ended', restart))
   stream.getVideoTracks().forEach((t) => t.stop())
 
   const audio = new AudioContext()
@@ -146,6 +157,8 @@ async function start() {
   let named = null, style = 'pop', hueA = 200, hueB = 300
   const feel = { bassShare: 0.4, brightness: 0.5, loudness: 0.1, vocal: 0.3 }
   window.live.onGenre((g) => { named = g })
+  let playing = false, heardAt = performance.now()
+  window.live.onPlaying((p) => { playing = p })
 
   const wave = (now, power, hue) => {
     waves.push({
@@ -166,6 +179,8 @@ async function start() {
     t0 = now
     frame++
     analyser.getByteFrequencyData(bins)
+    if (bins.some((b) => b > 0) || !playing) heardAt = now
+    else if (now - heardAt > 4000) restart()
     const bassFlux = flux(30, 160)
     const bassRaw = band(30, 160), midRaw = band(160, 2000), highRaw = band(2500, 9000)
     const bass = level.bass(bassRaw), mid = level.mid(midRaw), high = level.high(highRaw)

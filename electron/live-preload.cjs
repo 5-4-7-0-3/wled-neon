@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('live', {
   frame: (rgb) => ipcRenderer.send('live:frame', rgb),
   // Genre of the playing track from its title, or null when it is unknown
   onGenre: (cb) => ipcRenderer.on('live:genre', (_e, genre) => cb(genre)),
+  // Whether Windows says some app is playing media right now
+  onPlaying: (cb) => ipcRenderer.on('live:playing', (_e, playing) => cb(playing)),
 })

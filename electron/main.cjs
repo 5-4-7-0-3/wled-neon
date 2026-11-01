@@ -109,7 +109,10 @@ function setLive(mode) {
     },
   })
   liveWin.loadFile(path.join(__dirname, `${mode}.html`))
-  liveWin.webContents.on('did-finish-load', () => liveWin?.webContents.send('live:genre', genre))
+  liveWin.webContents.on('did-finish-load', () => {
+    liveWin?.webContents.send('live:genre', genre)
+    liveWin?.webContents.send('live:playing', mediaPlaying)
+  })
 }
 
 ipcMain.handle('live:room', () => ROOM)
@@ -147,7 +150,7 @@ const GENRES = [
   [/pop/i, 'pop'],
 ]
 
-let trackKey, genre = null
+let trackKey, genre = null, mediaPlaying = false
 const genreCache = new Map()
 const artistCache = new Map()
 
@@ -276,6 +279,11 @@ function onMedia(line) {
   }
   sessions = [].concat(sessions ?? [])
   if (liveMode === 'music') lookUpGenre(sessions.find((s) => s.playing && s.title))
+  const nowPlaying = sessions.some((s) => s.playing)
+  if (nowPlaying !== mediaPlaying) {
+    mediaPlaying = nowPlaying
+    liveWin?.webContents.send('live:playing', mediaPlaying)
+  }
   const playing = sessions.some((s) => s.playing && ANTHEM.test(`${s.title} ${s.artist}`))
   if (playing) anthemSeen = Date.now()
   if (playing && !anthemOn && cfg.anthem && online) startAnthem()
