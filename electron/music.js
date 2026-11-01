@@ -1,14 +1,14 @@
 // Hidden window: listens to what the PC plays and paints the room with it.
-// Each bass hit sends a wave of light both ways round the room from a random spot, the mids keep a
-// soft glow breathing, the highs flash as sparks. The colour drifts slowly and leans warmer or
-// cooler with how bright the sound is.
+// Each beat sends a wave of light both ways round the room from a random spot (stronger hits make
+// wider, faster waves), a drop flashes the whole room, the mids keep a soft glow breathing and the
+// highs flash as sparks. The colour follows where the sound sits: bass-heavy music goes deep
+// blue and violet, bright music warm.
 
-const FPS = 40
-const WAVE_SPEED = 70 // LEDs per second
-const WAVE_WIDTH = 5
-const WAVE_LIFE = 1.6 // seconds until a wave has faded out
-const GLOW = 0.28
+const FPS = 60
+const GLOW = 0.26
 const GAMMA = 1.6
+const MIN_GAP = 120 // ms between beats
+const DROP_GAP = 2000 // ms between room flashes
 
 function hsv(h, s, v) {
   const f = (n) => {
@@ -19,7 +19,7 @@ function hsv(h, s, v) {
 }
 
 // Loudness differs a lot between tracks; each band is measured against its own recent peak
-function follower(decay = 0.995) {
+function follower(decay = 0.996) {
   let peak = 1e-3
   return (v) => {
     peak = Math.max(v, peak * decay, 1e-3)
@@ -35,71 +35,110 @@ async function start() {
 
   const audio = new AudioContext()
   const analyser = audio.createAnalyser()
-  analyser.fftSize = 2048
-  analyser.smoothingTimeConstant = 0.55
+  // Short window and little smoothing: beats are found from how fast the spectrum rises
+  analyser.fftSize = 1024
+  analyser.smoothingTimeConstant = 0.2
   audio.createMediaStreamSource(stream).connect(analyser)
   // An analyser that leads nowhere may not be processed; a muted output keeps the graph running
   const mute = audio.createGain()
   mute.gain.value = 0
   analyser.connect(mute).connect(audio.destination)
+
   const bins = new Uint8Array(analyser.frequencyBinCount)
+  const prev = new Uint8Array(analyser.frequencyBinCount)
   const hz = audio.sampleRate / analyser.fftSize
+  const range = (lo, hi) => [Math.max(1, Math.floor(lo / hz)), Math.ceil(hi / hz)]
   const band = (lo, hi) => {
+    const [a, b] = range(lo, hi)
     let s = 0
-    const a = Math.floor(lo / hz), b = Math.ceil(hi / hz)
     for (let i = a; i < b; i++) s += bins[i]
     return s / (b - a) / 255
   }
+  // Spectral flux: how much the band got louder since the last frame
+  const flux = (lo, hi) => {
+    const [a, b] = range(lo, hi)
+    let s = 0
+    for (let i = a; i < b; i++) s += Math.max(0, bins[i] - prev[i])
+    return s / (b - a) / 255
+  }
 
-  const level = { bass: follower(), mid: follower(), high: follower() }
+  const level = { mid: follower(), high: follower(), bass: follower() }
+  const history = [] // recent bass flux, about 1.5 s
   const waves = []
   const sparks = new Float32Array(room.len)
   const glow = new Float32Array(3)
-  let bassAvg = 0, lastBeat = 0, hue = 200, t0 = performance.now()
+  let lastBeat = 0, lastDrop = 0, flash = 0, flashHue = 0
+  let shortE = 0, longE = 0, tone = 0.5
 
   const tick = () => {
     const now = performance.now()
-    const dt = (now - t0) / 1000
-    t0 = now
     analyser.getByteFrequencyData(bins)
-    const rawBass = band(30, 150)
-    const bass = level.bass(rawBass), mid = level.mid(band(150, 2000)), high = level.high(band(2500, 9000))
-    const quiet = rawBass + band(150, 2000) < 0.02
+    const bassFlux = flux(30, 160)
+    const bassRaw = band(30, 160), midRaw = band(160, 2000), highRaw = band(2500, 9000)
+    const bass = level.bass(bassRaw), mid = level.mid(midRaw), high = level.high(highRaw)
+    const energy = (bassRaw + midRaw + highRaw) / 3
+    const quiet = energy < 0.015
 
-    // Brighter sound leans the colour warmer, darker sound cooler, on top of a slow drift
-    const lean = (high - bass) * 40
-    hue = (hue + dt * 8 + 360) % 360
+    // Where the sound sits, from bass (0) to treble (1), on a log scale and smoothed
+    let w = 0, sum = 0
+    for (let i = 1; i < bins.length; i++) { w += i * hz * bins[i]; sum += bins[i] }
+    const centroid = sum ? w / sum : 500
+    const t = Math.min(1, Math.max(0, Math.log(centroid / 150) / Math.log(4000 / 150)))
+    tone += (t - tone) * 0.03
+    const hue = 260 - tone * 240 + Math.sin(now / 9000) * 25
 
-    // A beat is a bass jump well above its running average, at most ~6 per second
-    bassAvg += (rawBass - bassAvg) * 0.08
-    if (!quiet && rawBass > bassAvg * 1.35 && rawBass > 0.12 && now - lastBeat > 160) {
+    // A beat is a bass rise well above what the last second and a half was doing
+    history.push(bassFlux)
+    if (history.length > FPS * 1.5) history.shift()
+    const mean = history.reduce((a, b) => a + b, 0) / history.length
+    const sd = Math.sqrt(history.reduce((a, b) => a + (b - mean) ** 2, 0) / history.length)
+    if (!quiet && bassFlux > mean + 1.5 * sd && bassFlux > 0.02 && now - lastBeat > MIN_GAP) {
       lastBeat = now
-      waves.push({ born: now, origin: Math.floor(Math.random() * room.len), hue: (hue + lean + 360) % 360, power: Math.min(1, 0.5 + bass * 0.6) })
+      const p = Math.min(1, 0.4 + bass * 0.6)
+      waves.push({
+        born: now,
+        origin: Math.floor(Math.random() * room.len),
+        hue: (hue + (Math.random() - 0.5) * 40 + 360) % 360,
+        power: p,
+        width: 3 + 5 * p,
+        speed: 45 + 65 * p,
+        life: 1.1 + 0.8 * p,
+      })
     }
-    while (waves.length && now - waves[0].born > WAVE_LIFE * 1000) waves.shift()
+    for (let i = waves.length - 1; i >= 0; i--) if (now - waves[i].born > waves[i].life * 1000) waves.splice(i, 1)
 
-    const g = hsv((hue + lean + 180) % 360, 0.75, quiet ? 0 : GLOW * (0.25 + 0.75 * mid))
-    for (let k = 0; k < 3; k++) glow[k] += (g[k] - glow[k]) * 0.15
+    // A drop: the music suddenly gets much louder than it has been for the last few seconds
+    shortE += (energy - shortE) * 0.25
+    longE += (energy - longE) * 0.006
+    if (!quiet && shortE > longE * 1.8 && shortE > 0.12 && now - lastDrop > DROP_GAP) {
+      lastDrop = now
+      flash = 0.85
+      flashHue = hue
+    }
+    flash *= 0.9
+
+    const g = hsv((hue + 35) % 360, 0.7, quiet ? 0 : GLOW * (0.2 + 0.8 * mid))
+    for (let k = 0; k < 3; k++) glow[k] += (g[k] - glow[k]) * 0.12
 
     // Sparks: random LEDs flash with the highs and fade quickly
-    for (let v = 0; v < room.len; v++) sparks[v] *= 0.82
+    for (let v = 0; v < room.len; v++) sparks[v] *= 0.85
     if (!quiet) {
-      const n = Math.round(high * high * 6)
-      for (let i = 0; i < n; i++) sparks[Math.floor(Math.random() * room.len)] = 0.6 + high * 0.4
+      const n = Math.round(high * high * 4)
+      for (let i = 0; i < n; i++) sparks[Math.floor(Math.random() * room.len)] = 0.55 + high * 0.45
     }
 
+    const f = hsv(flashHue, 0.55, flash)
     const rgb = new Uint8Array(room.len * 3)
     for (let v = 0; v < room.len; v++) {
-      let r = glow[0], gg = glow[1], b = glow[2]
-      for (const w of waves) {
+      let r = Math.max(glow[0], f[0]), gg = Math.max(glow[1], f[1]), b = Math.max(glow[2], f[2])
+      for (const wv of waves) {
         // Distance along the ceiling from where the wave started, going either way round the room
-        const d = Math.min(Math.abs(v - w.origin), room.len - Math.abs(v - w.origin))
-        const age = (now - w.born) / 1000
-        const front = age * WAVE_SPEED
-        const x = (d - front) / WAVE_WIDTH
+        const d = Math.min(Math.abs(v - wv.origin), room.len - Math.abs(v - wv.origin))
+        const age = (now - wv.born) / 1000
+        const x = (d - age * wv.speed) / wv.width
         if (x < -2 || x > 2) continue
-        const a = Math.exp(-x * x) * w.power * (1 - age / WAVE_LIFE)
-        const c = hsv(w.hue, 0.9, a)
+        const a = Math.exp(-x * x) * wv.power * (1 - age / wv.life)
+        const c = hsv(wv.hue, 0.9, a)
         r = Math.max(r, c[0]); gg = Math.max(gg, c[1]); b = Math.max(b, c[2])
       }
       const s = sparks[v]
@@ -110,6 +149,7 @@ async function start() {
       rgb[v * 3 + 2] = Math.round(255 * Math.pow(Math.min(1, b), GAMMA))
     }
     window.live.frame(rgb)
+    prev.set(bins)
   }
   setInterval(tick, 1000 / FPS)
 }
