@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
-// Bridge for the hidden windows of the live modes (cinema, music) that stream frames to the room
+// Bridge for the hidden windows of the live modes (cinema, music, game) that stream frames to the room
 contextBridge.exposeInMainWorld('live', {
   room: () => ipcRenderer.invoke('live:room'),
   frame: (rgb) => ipcRenderer.send('live:frame', rgb),
@@ -8,4 +8,8 @@ contextBridge.exposeInMainWorld('live', {
   onGenre: (cb) => ipcRenderer.on('live:genre', (_e, genre) => cb(genre)),
   // Whether Windows says some app is playing media right now
   onPlaying: (cb) => ipcRenderer.on('live:playing', (_e, playing) => cb(playing)),
+  // Profile of the running game (e.g. "deathStranding"), or null
+  onProfile: (cb) => ipcRenderer.on('live:profile', (_e, profile) => cb(profile)),
+  // Game buttons pressed while the game is in front: a scan, or holding the breath starting/ending
+  onInput: (cb) => ipcRenderer.on('live:input', (_e, event) => cb(event)),
 })

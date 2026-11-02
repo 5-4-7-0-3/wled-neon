@@ -12,12 +12,12 @@ export interface Light {
   len: number
   // Preset the controller says is active, -1 after any change
   ps: number
-  // Live mode the desktop app paints the room with: from the screen or from the sound
+  // Live mode the desktop app paints the room with: from the screen, the sound, or both
   live: LiveMode | null
 }
 
-export type LiveMode = 'cinema' | 'music'
-const LIVE_MODES: LiveMode[] = ['cinema', 'music']
+export type LiveMode = 'cinema' | 'music' | 'game'
+const LIVE_MODES: LiveMode[] = ['cinema', 'music', 'game']
 
 export interface Preset {
   id: number
@@ -51,7 +51,7 @@ export const countFromPal = (pal: number) => (pal === 4 ? 3 : pal === 3 ? 2 : 1)
 // The strip runs around the room, so the parts are rarely equal: the user puts each boundary
 // where it fits the walls. The boundaries are kept on the controller in segment 0's name
 // ("2:0,68;3:0,55,111"), so every device shows the same split. The same name carries the
-// live mode ("cinema", "music"), which the desktop app watches. The controller's LED map starts
+// live mode ("cinema", "music", "game"), which the desktop app watches. The controller's LED map starts
 // the strip in the middle of a short wall, so the default two-part split halves the room.
 export const equalBounds = (n: number, len: number) =>
   Array.from({ length: n }, (_, i) => Math.round((len * i) / n))

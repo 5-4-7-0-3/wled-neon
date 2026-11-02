@@ -12,7 +12,7 @@ const START_HIDDEN = process.argv.includes('--hidden')
 const WIDTH = 360
 
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json')
-let cfg = { host: '192.168.1.12', autostartSet: false, anthem: true }
+let cfg = { host: '192.168.1.12', autostartSet: false, anthem: true, games: true }
 
 // The room as measured on the strip, in the controller's LED order (its LED map starts in the
 // middle of the right short wall). Each wall: first LED, LED count and the direction the strip
@@ -84,7 +84,7 @@ function send(patch) {
 // ---- Live modes: paint the room from the screen (cinema) or the sound (music) ----
 
 // Each mode is a hidden window (electron/<mode>.html) that streams finished frames back here
-const LIVE_MODES = ['cinema', 'music']
+const LIVE_MODES = ['cinema', 'music', 'game']
 let liveMode, liveWin, udp
 
 function setLive(mode) {
@@ -112,6 +112,7 @@ function setLive(mode) {
   liveWin.webContents.on('did-finish-load', () => {
     liveWin?.webContents.send('live:genre', genre)
     liveWin?.webContents.send('live:playing', mediaPlaying)
+    liveWin?.webContents.send('live:profile', liveMode === 'game' ? gameProfile : null)
   })
 }
 
@@ -252,32 +253,53 @@ function lookUpGenre(session) {
 // ---- Anthem: show the flag while the Ukrainian anthem plays ----
 
 const ANTHEM = /гімн україни|гимн украины|ще не вмерла|national anthem of ukraine|ukrainian national anthem|anthem of ukraine|shche ne vmerla/i
-let media, anthemOn = false, anthemSeen = 0, beforeAnthem
+let anthemOn = false, anthemSeen = 0, beforeAnthem
+const watchers = []
 
-function watchMedia() {
+// Runs a PowerShell script from electron/ that prints a JSON line now and then, and restarts it
+// if it dies
+function watch(file, onLine) {
   // PowerShell cannot run a script from inside app.asar, so pass it inline
-  const script = fs.readFileSync(path.join(__dirname, 'media.ps1'), 'utf8')
+  const script = fs.readFileSync(path.join(__dirname, file), 'utf8')
   const encoded = Buffer.from(script, 'utf16le').toString('base64')
-  media = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true })
-  let buf = ''
-  media.stdout.setEncoding('utf8')
-  media.stdout.on('data', (chunk) => {
-    buf += chunk
-    const lines = buf.split(/\r?\n/)
-    buf = lines.pop()
-    for (const line of lines) onMedia(line)
-  })
-  media.on('exit', () => { if (!app.isQuitting) setTimeout(watchMedia, 5000) })
+  const handle = {
+    stopped: false,
+    proc: null,
+    stop() {
+      this.stopped = true
+      this.proc?.kill()
+    },
+  }
+  const run = () => {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { windowsHide: true })
+    handle.proc = proc
+    let buf = ''
+    proc.stdout.setEncoding('utf8')
+    proc.stdout.on('data', (chunk) => {
+      buf += chunk
+      const lines = buf.split(/\r?\n/)
+      buf = lines.pop()
+      for (const line of lines) {
+        let data
+        try {
+          data = JSON.parse(line)
+        } catch {
+          continue // not a complete JSON line
+        }
+        onLine(data)
+      }
+    })
+    proc.on('exit', () => {
+      if (!app.isQuitting && !handle.stopped) setTimeout(() => { if (!handle.stopped) run() }, 5000)
+    })
+  }
+  run()
+  watchers.push(handle)
+  return handle
 }
 
-function onMedia(line) {
-  let sessions
-  try {
-    sessions = JSON.parse(line)
-  } catch {
-    return
-  }
-  sessions = [].concat(sessions ?? [])
+function onMedia(list) {
+  const sessions = [].concat(list ?? [])
   if (liveMode === 'music') lookUpGenre(sessions.find((s) => s.playing && s.title))
   const nowPlaying = sessions.some((s) => s.playing)
   if (nowPlaying !== mediaPlaying) {
@@ -295,23 +317,127 @@ function onMedia(line) {
 // flash, which stalls it for several seconds and delays the flag
 async function startAnthem() {
   anthemOn = true
-  try {
-    beforeAnthem = await (await fetch(`http://${cfg.host}/json/state`)).json()
-  } catch {
-    beforeAnthem = undefined
-  }
+  beforeAnthem = await snapshot()
   win?.webContents.send('flag')
 }
 
 function stopAnthem() {
   anthemOn = false
-  if (!beforeAnthem) return
-  const { on, bri, seg = [] } = beforeAnthem
+  restore(beforeAnthem)
+  beforeAnthem = undefined
+}
+
+function snapshot() {
+  return fetch(`http://${cfg.host}/json/state`).then((r) => r.json(), () => undefined)
+}
+
+function restore(saved) {
+  if (!saved) return
+  const { on, bri, seg = [] } = saved
   const restored = seg.map((g) => ({ ...g, frz: false }))
-  // Segments added for the flag must go, otherwise they stay over the restored layout
+  // Segments added since must go, otherwise they stay over the restored layout
   for (let id = seg.length; id < 4; id++) restored.push({ id, stop: 0 })
   send({ on, bri, seg: restored })
-  beforeAnthem = undefined
+}
+
+// ---- Games: switch to the game mode while one is running ----
+
+// Where launchers install games; anything started from there counts as a game
+const GAME_DIRS = /\\steamapps\\common\\|\\Epic Games\\|\\GOG Galaxy\\Games\\|\\XboxGames\\|\\Riot Games\\|\\Ubisoft Game Launcher\\games\\|\\EA Games\\/i
+// Tools that live among games but are not played (Wallpaper Engine sits in steamapps too)
+const NOT_GAMES = /wallpaper|crash|launcher|unins|setup|redist|helper/i
+// Programs often used full screen that are not games
+const NOT_GAME_APPS = /\\(chrome|msedge|firefox|opera|brave|vivaldi|vlc|mpc-hc64|mpc-be64|PotPlayerMini64|wmplayer|Video\.UI|explorer|ApplicationFrameHost|Claude|Neon|Code|Telegram|Discord|obs64|POWERPNT)\.exe$/i
+
+let gamePid, gameWindow, gameSeen = 0, beforeGame, gameProfile = null, inGame = false, input
+
+// Games with a profile of their own in game.js, by where they are installed
+const PROFILES = [[/death stranding/i, 'deathStranding'], [/don'?t ?starve/i, 'dontStarve']]
+// Profiles that react to game buttons; the others never need the input watcher
+const INPUT_PROFILES = ['deathStranding']
+
+function isGame({ path: exe, full }) {
+  if (!exe) return false
+  const name = exe.split('\\').pop()
+  if (GAME_DIRS.test(exe)) return !NOT_GAMES.test(name)
+  return full && !NOT_GAME_APPS.test(exe) && !/\\Windows\\/i.test(exe)
+}
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function onForeground(fg) {
+  inGame = !!gamePid && fg.pid === gamePid
+  if (gamePid) {
+    // The game counts as running until it exits, so alt-tabbing out does not end the mode
+    if (!alive(gamePid)) stopGame()
+    return
+  }
+  if (!cfg.games || !online || !isGame(fg)) { gameSeen = 0; return }
+  // Two checks in a row, so a game that only flashes to the front while loading is ignored
+  if (gameSeen !== fg.pid) { gameSeen = fg.pid; return }
+  startGame(fg.pid, fg.hwnd, fg.path)
+}
+
+async function startGame(pid, hwnd, exe) {
+  gamePid = pid
+  gameWindow = hwnd
+  gameProfile = PROFILES.find(([re]) => re.test(exe))?.[1] ?? null
+  inGame = true
+  if (INPUT_PROFILES.includes(gameProfile)) watchInput()
+  // Already in the game mode (picked by hand, or left on): start the capture over on the window
+  if (liveMode === 'game') setLive('game')
+  beforeGame = await snapshot()
+  const name = (beforeGame?.seg?.[0]?.n ?? '').split(';').filter((t) => t && !LIVE_MODES.includes(t))
+  send({ on: true, seg: [{ id: 0, n: [...name, 'game'].join(';') }] })
+}
+
+function stopGame() {
+  gamePid = undefined
+  gameWindow = undefined
+  gameProfile = null
+  input?.stop()
+  input = undefined
+  gameSeen = 0
+  // Only put the light back if it is still the game mode; a style picked meanwhile stays
+  if (liveMode === 'game') restore(beforeGame)
+  beforeGame = undefined
+}
+
+// The buttons a game profile reacts to. A controller has scan and hold breath on one bumper: a
+// tap scans, holding it holds the breath. Presses only count while the game is in front, so
+// typing in another window does not set anything off.
+const HOLD = 450 // ms
+
+function watchInput() {
+  input?.stop()
+  let bumperDown = 0, breath = false, holdTimer
+  const tell = (event) => { if (inGame) liveWin?.webContents.send('live:input', event) }
+  const setBreath = (on) => {
+    if (on === breath) return
+    breath = on
+    tell({ breath })
+  }
+  let keys = { scan: false, breath: false, bumper: false }
+  input = watch('input.ps1', (k) => {
+    if (k.scan && !keys.scan) tell({ scan: true })
+    if (k.bumper && !keys.bumper) {
+      bumperDown = Date.now()
+      holdTimer = setTimeout(() => setBreath(true), HOLD)
+    }
+    if (!k.bumper && keys.bumper) {
+      clearTimeout(holdTimer)
+      if (Date.now() - bumperDown < HOLD) tell({ scan: true })
+    }
+    setBreath(k.breath || (k.bumper && Date.now() - bumperDown >= HOLD))
+    keys = k
+  })
 }
 
 // ---- Tray ----
@@ -335,6 +461,7 @@ function trayMenu() {
     { label: 'Відкрити панель', click: showWindow },
     { type: 'separator' },
     { label: 'Прапор під гімн України', type: 'checkbox', checked: cfg.anthem, click: (i) => setAnthem(i.checked) },
+    { label: 'Підсвітка для ігор', type: 'checkbox', checked: cfg.games, click: (i) => setGames(i.checked) },
     { label: 'Запускати з Windows', type: 'checkbox', checked: autostart, click: (i) => setAutostart(i.checked) },
     { type: 'separator' },
     { label: 'Вихід', click: quit },
@@ -345,6 +472,12 @@ function setAnthem(enabled) {
   cfg.anthem = enabled
   saveConfig()
   if (!enabled && anthemOn) stopAnthem()
+}
+
+function setGames(enabled) {
+  cfg.games = enabled
+  saveConfig()
+  if (!enabled && gamePid) stopGame()
 }
 
 function setAutostart(enabled) {
@@ -423,7 +556,7 @@ ipcMain.on('win:hide', () => win.hide())
 
 function quit() {
   app.isQuitting = true
-  media?.kill()
+  for (const w of watchers) w.stop()
   app.exit(0)
 }
 
@@ -435,9 +568,15 @@ app.whenReady().then(() => {
   loadConfig()
 
   // Live modes capture the main screen, and music the system sound, without asking each time
+  // Many games draw past the desktop, so a screen capture only sees the frame from before the
+  // game; the game mode captures the game's own window instead
   session.defaultSession.setDisplayMediaRequestHandler((req, callback) => {
-    desktopCapturer.getSources({ types: ['screen'] }).then(
-      (sources) => callback({ video: sources[0], ...(req.audioRequested ? { audio: 'loopback' } : {}) }),
+    const audio = req.audioRequested ? { audio: 'loopback' } : {}
+    desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } }).then(
+      (sources) => {
+        const game = liveMode === 'game' && gameWindow && sources.find((s) => s.id.startsWith(`window:${gameWindow}:`))
+        callback({ video: game || sources.find((s) => s.id.startsWith('screen:')), ...audio })
+      },
       () => callback(null),
     )
   })
@@ -456,6 +595,7 @@ app.whenReady().then(() => {
 
   createWindow()
   connect()
-  watchMedia()
+  watch('media.ps1', onMedia)
+  watch('foreground.ps1', onForeground)
   if (!START_HIDDEN) win.once('ready-to-show', showWindow)
 })

@@ -13,6 +13,15 @@ const FLAG: [RGB, RGB] = [[255, 200, 0], [0, 80, 255]]
 const FLAG_ID = -1
 const CINEMA_ID = -2
 const MUSIC_ID = -3
+const GAME_ID = -4
+
+// Styles the desktop app paints live, by their tile id
+const LIVE: Record<number, NonNullable<Light['live']>> = { [CINEMA_ID]: 'cinema', [MUSIC_ID]: 'music', [GAME_ID]: 'game' }
+const LIVE_HINT: Record<NonNullable<Light['live']>, string> = {
+  cinema: 'Кольори бере програма на ПК з екрана, поки вона запущена',
+  music: 'Програма на ПК малює під звук, який грає комп’ютер, поки вона запущена',
+  game: 'Програма на ПК бере кольори й звук гри. Вмикається сама, коли запускаєш гру',
+}
 const same = (a: RGB, b: RGB) => a.join() === b.join()
 const css = (c: RGB) => `rgb(${c})`
 
@@ -26,6 +35,7 @@ const STYLES: Style[] = [
   { id: 67, name: 'Хвилі', preview: '', colors: true, moving: true },
   // Painted by the desktop app from the screen; the controller shows the static colours meanwhile
   { id: CINEMA_ID, name: 'Кіно', preview: 'linear-gradient(90deg, #1b3a6b, #c96a2b, #6b2b8c, #2b8c7a, #1b3a6b)', moving: true },
+  { id: GAME_ID, name: 'Гра', preview: 'linear-gradient(90deg, #0b1d12, #2bd46b, #0b1d12 45%, #ff6a1a 55%, #0b1d12)', moving: true },
   { id: MUSIC_ID, name: 'Музика', preview: 'radial-gradient(circle at 50% 50%, #ff2bd6 0 12%, #2b1bff 30%, #0b0b25 55%, #ff8a00 75%, #0b0b25 90%)', moving: true },
 ]
 
@@ -185,7 +195,8 @@ export function App() {
   const split = light.fx === STATIC && count > 1
   const bounds = light.bounds[count] ?? equalBounds(count, light.len)
   const isFlag = split && count === 2 && same(light.cols[0], FLAG[0]) && same(light.cols[1], FLAG[1])
-  const styleId = light.live === 'cinema' ? CINEMA_ID : light.live === 'music' ? MUSIC_ID : isFlag ? FLAG_ID : light.fx
+  const liveId = Object.entries(LIVE).find(([, m]) => m === light.live)?.[0]
+  const styleId = liveId ? +liveId : isFlag ? FLAG_ID : light.fx
   const style = STYLES.find((s) => s.id === styleId)
   const cols = light.cols.slice(0, count)
 
@@ -236,8 +247,7 @@ export function App() {
     setPicking(false)
     if (id === FLAG_ID) return setFlag()
     const own = isFlag ? recall() : {}
-    if (id === CINEMA_ID) relayout({ fx: STATIC, live: 'cinema', ...own })
-    else if (id === MUSIC_ID) relayout({ fx: STATIC, live: 'music', ...own })
+    if (LIVE[id]) relayout({ fx: STATIC, live: LIVE[id], ...own })
     else relayout({ fx: id, live: null, ...own })
   }
 
@@ -337,9 +347,7 @@ export function App() {
           <span className="chev">›</span>
         </button>
         {light.live && (
-          <small className="hint">
-            {light.live === 'cinema' ? 'Кольори бере програма на ПК з екрана' : 'Програма на ПК малює під звук, який грає комп’ютер'}, поки вона запущена
-          </small>
+          <small className="hint">{LIVE_HINT[light.live]}</small>
         )}
         {style?.moving && !light.live && (
           <>
