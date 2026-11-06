@@ -34,6 +34,8 @@ interface WledSegment {
   n?: string
 }
 
+export type Snapshot = WledState
+
 interface WledState {
   on: boolean
   bri: number
@@ -137,12 +139,89 @@ export function toLight(s: WledState, prev: Light): Light {
   }
 }
 
+// ---- Room setup, kept on the controller in /neon.json so the phone and the PC share it ----
+
+// Positions are in the controller's LED order (after its LED map). The corners go round the room
+// starting from the right short wall's corner with the monitor wall: right→screen, screen→left,
+// left→back, back→right. `shift` is how far the LED map turns the strip, `balance` the white
+// balance every colour is scaled by.
+export interface Setup {
+  corners: [number, number, number, number]
+  monitor: number
+  bed: [number, number]
+  shift: number
+  balance: RGB
+}
+
+export const DEFAULT_SETUP: Setup = {
+  corners: [12, 55, 81, 123],
+  monitor: 21,
+  bed: [82, 98],
+  shift: 13,
+  balance: [1, 1, 1],
+}
+
+export async function loadSetup(host: string): Promise<Setup> {
+  try {
+    const s = await fetch(`http://${host}/neon.json`).then((r) => r.json())
+    return { ...DEFAULT_SETUP, ...s }
+  } catch {
+    return DEFAULT_SETUP
+  }
+}
+
+const upload = (host: string, name: string, data: unknown) => {
+  const form = new FormData()
+  form.append('data', new Blob([JSON.stringify(data)], { type: 'application/json' }), name)
+  return fetch(`http://${host}/upload`, { method: 'POST', body: form })
+}
+
+export const saveSetup = (host: string, s: Setup) => upload(host, 'neon.json', s)
+
+export async function ledCount(host: string): Promise<number> {
+  const info = await fetch(`http://${host}/json/info`).then((r) => r.json())
+  return info.leds.count
+}
+
+// The LED map has one entry per LED, so it is rebuilt for the new count with the same turn; the
+// controller restarts to pick up both
+export async function setLedCount(host: string, n: number, shift: number) {
+  const cfg = await fetch(`http://${host}/json/cfg`).then((r) => r.json())
+  const led = cfg.hw.led
+  led.total = n
+  led.ins[0].len = n
+  await fetch(`http://${host}/json/cfg`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hw: { led } }),
+  })
+  await upload(host, 'ledmap.json', { map: Array.from({ length: n }, (_, v) => (v + shift) % n) })
+  await fetch(`http://${host}/json/state`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rb: true }),
+  })
+}
+
+// White balance: colours go to the controller scaled, and come back unscaled, so the app keeps
+// showing the colours the user picked
+const scale = (c: number[], k: RGB, back = false) =>
+  c.map((v, i) => (i < 3 ? Math.min(255, Math.round(back ? v / k[i] : v * k[i])) : v))
+
+function balanceSegs<T extends object>(patch: T & { seg?: unknown }, k: RGB, back = false): T {
+  if (k.every((v) => v === 1) || !patch.seg) return patch
+  const segs = Array.isArray(patch.seg) ? patch.seg : [patch.seg]
+  const out = segs.map((g: WledSegment) => (g.col ? { ...g, col: g.col.map((c) => scale(c, k, back)) } : g))
+  return { ...patch, seg: Array.isArray(patch.seg) ? out : out[0] }
+}
+
+// A state saved under one white balance, with its colours moved to another
+export const rebalance = <T extends object>(s: T, from: RGB, to: RGB) =>
+  balanceSegs(balanceSegs(s, from, true), to)
+
 // Live connection over the WLED WebSocket, so changes made from another
 // device (phone, PC, button) show up immediately. Falls back to HTTP for sends.
 export class Wled {
   private ws?: WebSocket
   private retry?: ReturnType<typeof setTimeout>
   private closed = false
+  balance: RGB = [1, 1, 1]
 
   constructor(
     private host: string,
@@ -150,10 +229,27 @@ export class Wled {
     private onConnection: (ok: boolean) => void,
   ) {
     this.connect()
-    fetch(`http://${host}/json/state`)
+    this.refresh()
+  }
+
+  // Re-reads the state, e.g. after the white balance changed and colours need unscaling anew
+  refresh() {
+    fetch(`http://${this.host}/json/state`)
       .then((r) => r.json())
-      .then(onState)
+      .then((s) => this.onState(balanceSegs(s, this.balance, true)))
       .catch(() => {})
+  }
+
+  // The state as it is, to put back exactly after calibration painted over it
+  snapshot(): Promise<Snapshot> {
+    return fetch(`http://${this.host}/json/state`).then((r) => r.json())
+  }
+
+  restore(s: Snapshot) {
+    const seg: object[] = (s.seg ?? []).map((g) => ({ ...g, frz: false }))
+    for (let id = seg.length; id < 4; id++) seg.push({ id, stop: 0 })
+    // Sent raw: the snapshot's colours are already balanced
+    this.sendRaw({ on: s.on, bri: s.bri, lor: 0, seg })
   }
 
   private connect() {
@@ -164,7 +260,7 @@ export class Wled {
     ws.onmessage = (e) => {
       try {
         const d = JSON.parse(e.data)
-        if (d.state) this.onState(d.state)
+        if (d.state) this.onState(balanceSegs(d.state, this.balance, true))
       } catch {
         // WLED also pushes non-JSON frames (e.g. live LED previews); ignore them
       }
@@ -176,6 +272,10 @@ export class Wled {
   }
 
   send(patch: object) {
+    this.sendRaw(balanceSegs(patch, this.balance))
+  }
+
+  sendRaw(patch: object) {
     const body = JSON.stringify(patch)
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(body)

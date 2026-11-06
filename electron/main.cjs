@@ -12,18 +12,45 @@ const START_HIDDEN = process.argv.includes('--hidden')
 const WIDTH = 360
 
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json')
-let cfg = { host: '192.168.1.12', autostartSet: false, anthem: true, games: true }
+let cfg = {
+  host: '192.168.1.12', autostartSet: false, anthem: true, games: true,
+  // How each live mode looks: brightness, smoothing and strength of its effects, 1 being as designed
+  modes: { cinema: { bright: 1, smooth: 1 }, game: { bright: 1, smooth: 1, effects: 1 }, music: { bright: 1, effects: 1 } },
+  // Games seen so far by exe path: whether to light up for them and which profile they get
+  gameList: {},
+}
 
-// The room as measured on the strip, in the controller's LED order (its LED map starts in the
-// middle of the right short wall). Each wall: first LED, LED count and the direction the strip
-// runs. The screen wall runs from the picture's left edge to its right with the monitor centre at
-// `center`; side walls run from the screen towards the bed; `bed` is the stretch above the bed.
-const ROOM = {
-  len: 136,
-  screen: { start: 54, count: 43, step: -1, center: 21 },
-  left: { start: 55, count: 26, step: 1 },
-  right: { start: 11, count: 25, step: -1 },
-  bed: { start: 82, count: 17 },
+// The room as calibrated in the app and kept on the controller (/neon.json), in the controller's
+// LED order (its LED map starts in the middle of the right short wall). Each wall: first LED, LED
+// count and the direction the strip runs. The screen wall runs from the picture's left edge to its
+// right with the monitor centre at `center`; side walls run from the screen towards the bed; `bed`
+// is the stretch above the bed. The defaults are the room as first measured.
+let setup = { corners: [12, 55, 81, 123], monitor: 21, bed: [82, 98], balance: [1, 1, 1] }
+let ledTotal = 136
+
+function room() {
+  const [c0, c1, c2, c3] = setup.corners
+  const len = ledTotal
+  return {
+    len,
+    screen: { start: c1 - 1, count: c1 - c0, step: -1, center: setup.monitor },
+    left: { start: c1, count: c2 - c1, step: 1 },
+    right: { start: c0 - 1, count: (c0 - c3 + len) % len, step: -1 },
+    bed: { start: setup.bed[0], count: setup.bed[1] - setup.bed[0] + 1 },
+  }
+}
+
+async function loadSetup() {
+  try {
+    const [s, info] = await Promise.all([
+      fetch(`http://${cfg.host}/neon.json`).then((r) => (r.ok ? r.json() : {})),
+      fetch(`http://${cfg.host}/json/info`).then((r) => r.json()),
+    ])
+    setup = { ...setup, ...s }
+    ledTotal = info.leds.count
+  } catch {
+    // Unreachable controller: keep what is known
+  }
 }
 
 function loadConfig() {
@@ -52,7 +79,7 @@ function connect() {
   ws?.close()
   const sock = new WebSocket(`ws://${cfg.host}/ws`)
   ws = sock
-  sock.onopen = () => { online = true; refreshTray() }
+  sock.onopen = () => { online = true; refreshTray(); loadSetup() }
   sock.onmessage = (e) => {
     try {
       const s = JSON.parse(e.data).state
@@ -116,9 +143,12 @@ function setLive(mode) {
   })
 }
 
-ipcMain.handle('live:room', () => ROOM)
+ipcMain.handle('live:room', () => room())
+ipcMain.handle('live:settings', () => cfg.modes[liveMode] ?? {})
 ipcMain.on('live:frame', (_e, rgb) => {
   if (!udp) return
+  const k = setup.balance
+  if (k.some((v) => v !== 1)) for (let i = 0; i < rgb.length; i++) rgb[i] = Math.round(rgb[i] * k[i % 3])
   // WLED "DRGB" realtime packet: protocol 2, then seconds to hold the frame if the stream stops
   udp.send(Buffer.concat([Buffer.from([2, 2]), Buffer.from(rgb)]), 21324, cfg.host)
 })
@@ -349,10 +379,10 @@ const NOT_GAMES = /wallpaper|crash|launcher|unins|setup|redist|helper/i
 // Programs often used full screen that are not games
 const NOT_GAME_APPS = /\\(chrome|msedge|firefox|opera|brave|vivaldi|vlc|mpc-hc64|mpc-be64|PotPlayerMini64|wmplayer|Video\.UI|explorer|ApplicationFrameHost|Claude|Neon|Code|Telegram|Discord|obs64|POWERPNT)\.exe$/i
 
-let gamePid, gameWindow, gameSeen = 0, beforeGame, gameProfile = null, inGame = false, input
+let gamePid, gameExe, gameWindow, gameSeen = 0, beforeGame, gameProfile = null, inGame = false, input
 
 // Games with a profile of their own in game.js, by where they are installed
-const PROFILES = [[/death stranding/i, 'deathStranding'], [/don'?t ?starve/i, 'dontStarve']]
+const PROFILES = [[/death stranding/i, 'deathStranding'], [/don'?t ?starve/i, 'dontStarve'], [/7 ?days ?to ?die/i, 'sevenDays']]
 // Profiles that react to game buttons; the others never need the input watcher
 const INPUT_PROFILES = ['deathStranding']
 
@@ -379,7 +409,7 @@ function onForeground(fg) {
     if (!alive(gamePid)) stopGame()
     return
   }
-  if (!cfg.games || !online || !isGame(fg)) { gameSeen = 0; return }
+  if (!cfg.games || !online || !isGame(fg) || cfg.gameList[fg.path]?.enabled === false) { gameSeen = 0; return }
   // Two checks in a row, so a game that only flashes to the front while loading is ignored
   if (gameSeen !== fg.pid) { gameSeen = fg.pid; return }
   startGame(fg.pid, fg.hwnd, fg.path)
@@ -387,19 +417,31 @@ function onForeground(fg) {
 
 async function startGame(pid, hwnd, exe) {
   gamePid = pid
+  gameExe = exe
   gameWindow = hwnd
-  gameProfile = PROFILES.find(([re]) => re.test(exe))?.[1] ?? null
+  // A game seen for the first time is listed in the settings, with the profile its name suggests
+  if (!cfg.gameList[exe]) {
+    const folder = exe.match(/\\steamapps\\common\\([^\\]+)/i)?.[1]
+    const name = folder ?? exe.split('\\').pop().replace(/\.exe$/i, '')
+    cfg.gameList[exe] = { name, enabled: true, profile: PROFILES.find(([re]) => re.test(exe))?.[1] ?? null }
+    saveConfig()
+  }
+  gameProfile = cfg.gameList[exe].profile
   inGame = true
   if (INPUT_PROFILES.includes(gameProfile)) watchInput()
   // Already in the game mode (picked by hand, or left on): start the capture over on the window
   if (liveMode === 'game') setLive('game')
   beforeGame = await snapshot()
   const name = (beforeGame?.seg?.[0]?.n ?? '').split(';').filter((t) => t && !LIVE_MODES.includes(t))
+  // The game mode may still be on from a game before (or picked by hand); putting that back after
+  // the game would leave it on for good, so the plain light underneath comes back instead
+  if (beforeGame?.seg?.[0]?.n?.split(';').includes('game')) beforeGame.seg[0].n = name.join(';')
   send({ on: true, seg: [{ id: 0, n: [...name, 'game'].join(';') }] })
 }
 
 function stopGame() {
   gamePid = undefined
+  gameExe = undefined
   gameWindow = undefined
   gameProfile = null
   input?.stop()
@@ -551,6 +593,39 @@ ipcMain.on('win:resize', (_e, height) => {
   if (win.isVisible()) placeWindow()
 })
 ipcMain.on('win:hide', () => win.hide())
+
+const desktopSettings = () => ({
+  anthem: cfg.anthem, games: cfg.games, autostart: app.getLoginItemSettings().openAtLogin,
+  modes: cfg.modes, gameList: cfg.gameList,
+})
+ipcMain.handle('settings:get', desktopSettings)
+
+// Sliders send many changes; the live mode starts over with them once the user lets go
+let retune
+ipcMain.handle('settings:set', (_e, p) => {
+  if ('anthem' in p) setAnthem(p.anthem)
+  if ('games' in p) setGames(p.games)
+  if ('autostart' in p) setAutostart(p.autostart)
+  if (p.modes) {
+    cfg.modes = p.modes
+    clearTimeout(retune)
+    retune = setTimeout(() => liveMode && setLive(liveMode), 500)
+  }
+  if (p.gameList) {
+    cfg.gameList = p.gameList
+    const running = gameExe && cfg.gameList[gameExe]
+    if (running?.enabled === false) stopGame()
+    else if (running && running.profile !== gameProfile) {
+      gameProfile = running.profile
+      if (INPUT_PROFILES.includes(gameProfile)) watchInput()
+      else { input?.stop(); input = undefined }
+      if (liveMode === 'game') setLive('game')
+    }
+  }
+  saveConfig()
+  return desktopSettings()
+})
+ipcMain.on('setup:changed', () => loadSetup().then(() => liveMode && setLive(liveMode)))
 
 // ---- App lifecycle ----
 

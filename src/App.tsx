@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, pieces, toLight, type Light, type Preset, type RGB,
+  PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, loadSetup, pieces, toLight, type Light, type Preset, type RGB,
 } from './wled'
+import { Settings } from './Settings'
 import { desktop, getHost, setHost } from './platform'
 
 const COLORS: RGB[] = [
@@ -107,7 +108,7 @@ export function App() {
   const [slot, setSlot] = useState(0)
   const [online, setOnline] = useState(false)
   const [host, setHostState] = useState<string>()
-  const [editing, setEditing] = useState(false)
+  const [settings, setSettings] = useState(false)
   const [picking, setPicking] = useState(false)
   const [presets, setPresets] = useState<Preset[]>([])
   const [naming, setNaming] = useState(false)
@@ -129,6 +130,8 @@ export function App() {
     )
     wled.current = w
     w.presets().then(setPresets, () => {})
+    // Colours are shown without the white balance, so the state is read again once it is known
+    loadSetup(host).then((s) => { w.balance = s.balance; w.refresh() })
     return () => w.close()
   }, [host])
 
@@ -169,11 +172,12 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
       if (picking) setPicking(false)
+      else if (settings) setSettings(false)
       else d?.hide()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [picking])
+  }, [picking, settings])
 
   const send = (patch: object) => {
     quietUntil.current = Date.now() + 600
@@ -273,7 +277,6 @@ export function App() {
 
   const saveHost = (value: string) => {
     const h = value.trim()
-    setEditing(false)
     if (!h || h === host) return
     setHost(h).then(() => setHostState(h))
   }
@@ -283,6 +286,14 @@ export function App() {
   const vars = { '--c': light.cols[0].join(',') } as React.CSSProperties
   const showColors = !isFlag && !light.live && (style?.colors ?? true)
   const pct = (v: number) => `${(v / light.len) * 100}%`
+
+  if (settings) {
+    return (
+      <main ref={root} className="panel" style={vars}>
+        <Settings wled={wled.current} host={host} saveHost={saveHost} close={() => setSettings(false)} />
+      </main>
+    )
+  }
 
   if (picking) {
     return (
@@ -311,10 +322,9 @@ export function App() {
     <main ref={root} className={light.on ? 'panel' : 'panel off'} style={vars}>
       <header>
         <h1>Неон</h1>
-        <button className="icon" onClick={() => setEditing((v) => !v)} aria-label="Адреса контролера">
-          <span className={online ? 'dot ok' : 'dot'} />
-        </button>
+        <span className={online ? 'dot ok' : 'dot'} title={online ? 'Контролер на зв’язку' : 'Немає зв’язку з контролером'} />
         <span className="spacer" />
+        <button className="icon gear" onClick={() => setSettings(true)} aria-label="Налаштування">⚙</button>
         <button
           role="switch" aria-checked={light.on} aria-label="Живлення"
           className={light.on ? 'switch on' : 'switch'}
@@ -322,15 +332,6 @@ export function App() {
         ><span /></button>
       </header>
 
-      {editing && (
-        <form className="card host" onSubmit={(e) => { e.preventDefault(); saveHost(new FormData(e.currentTarget).get('host') as string) }}>
-          <label htmlFor="host">Адреса контролера</label>
-          <div className="host-row">
-            <input id="host" name="host" defaultValue={host} autoFocus spellCheck={false} />
-            <button type="submit">OK</button>
-          </div>
-        </form>
-      )}
 
       <section className="card">
         <div className="row"><span>Яскравість</span><span>{Math.round(light.bri / 2.55)}%</span></div>

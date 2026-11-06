@@ -387,4 +387,67 @@ const PROFILES = {
       },
     }
   },
+
+  // 7 Days to Die
+  //  - blood moon (the horde night): the picture turns red and dark; the room glows a deep red
+  //    that breathes slowly, and every sharp sound (a shot, a zombie at the door) flares it up
+  //  - getting hurt: blood at the picture's edges flashes the room red
+  //  - night and dark buildings: the room dims with the picture
+  sevenDays() {
+    const BLOOD = [200, 8, 4]
+    const HURT = [255, 20, 10]
+    let moon = 0, dark = 0, hurt = 0, flare = 0, edgeAvg = 0, lastWave = 0, lastHurt = 0
+
+    // Red share of the whole picture and of its edges, and how bright it is
+    const read = ({ px, W, top, bottom, left, right }) => {
+      const bw = Math.max(2, Math.round((right - left) * 0.12)), bh = Math.max(2, Math.round((bottom - top) * 0.15))
+      let bright = 0, red = 0, redE = 0, n = 0, nE = 0
+      for (let y = top; y <= bottom; y++) {
+        for (let x = left; x <= right; x++) {
+          const i = (y * W + x) * 4
+          const r = px[i], g = px[i + 1], b = px[i + 2]
+          n++
+          bright += Math.max(r, g, b) / 255
+          const isRed = r > 50 && r > g * 1.8 && r > b * 1.6
+          red += isRed
+          if (x < left + bw || x > right - bw || y < top + bh || y > bottom - bh) { nE++; redE += isRed }
+        }
+      }
+      return { bright: bright / n, red: red / n, redE: redE / nE }
+    }
+
+    return {
+      quiet: () => dark * 0.6,
+      tick(now, frame) {
+        const s = read(frame)
+
+        // The blood moon tints the whole night red, so it is slow to come and go: a red wall close
+        // up or a burning car does not make one
+        moon += ((s.red > 0.35 && s.bright < 0.45 ? 1 : 0) - moon) * (s.red > 0.35 ? 0.01 : 0.004)
+        dark += ((s.bright < 0.1 ? 1 : 0) - dark) * 0.03
+
+        // A hit splashes blood on the edges all at once: a jump over the usual edge redness
+        if (s.redE - edgeAvg > 0.12 && s.redE > s.red * 1.5 && now - lastHurt > 400) {
+          lastHurt = now
+          hurt = 1
+        }
+        edgeAvg += (s.redE - edgeAvg) * 0.05
+        hurt *= 0.88
+
+        if (moon > 0.3 && sound?.last !== lastWave) flare = 1
+        lastWave = sound?.last
+        flare *= 0.9
+
+        const breathe = 0.7 + 0.3 * Math.sin((now / 1000) * Math.PI * 2 * 0.25)
+        for (let v = 0; v < room.len; v++) {
+          const { d } = fromMonitor(v)
+          const i = v * 3
+          const dim = Math.max(dark * 0.6, moon * 0.7)
+          gain[i] = gain[i + 1] = gain[i + 2] = gain[i] * (1 - dim) - dim
+          addLight(v, BLOOD, moon * (0.35 * breathe + 0.5 * flare * Math.exp(-d / 35)))
+          addLight(v, HURT, 0.7 * hurt * (0.5 + 0.5 * Math.exp(-d / 25)))
+        }
+      },
+    }
+  },
 }

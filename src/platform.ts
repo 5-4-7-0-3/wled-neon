@@ -6,6 +6,31 @@ interface DesktopBridge {
   hide(): void
   // Fired by the main process when the Ukrainian anthem starts playing
   onFlag(cb: () => void): void
+  getSettings(): Promise<DesktopSettings>
+  setSettings(patch: Partial<DesktopSettings>): Promise<DesktopSettings>
+  // The room setup on the controller changed; the live modes pick it up again
+  setupChanged(): void
+}
+
+export interface ModeTuning {
+  bright: number
+  smooth?: number
+  effects?: number
+}
+
+export interface GameEntry {
+  name: string
+  enabled: boolean
+  profile: string | null
+}
+
+export interface DesktopSettings {
+  anthem: boolean
+  games: boolean
+  autostart: boolean
+  modes: { cinema: ModeTuning; game: ModeTuning; music: ModeTuning }
+  // Games seen so far, by their exe path
+  gameList: Record<string, GameEntry>
 }
 
 declare global {

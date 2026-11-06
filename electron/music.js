@@ -99,6 +99,8 @@ function tempo(hist) {
 
 async function start() {
   const room = await window.live.room()
+  // Effects scale the beat waves, sparks and drops over the steady glow; brightness scales it all
+  const S = { bright: 1, effects: 1, ...(await window.live.settings()) }
   // Windows only hands out the system sound together with a screen capture; the video is dropped
   const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
   // The system sound is captured from the output that was the default when capture started.
@@ -276,7 +278,7 @@ async function start() {
       for (let i = 0; i < n; i++) sparks[Math.floor(Math.random() * room.len)] = 0.55 + high * 0.45
     }
 
-    const f = hsv(flashHue, 0.55, flash)
+    const f = hsv(flashHue, 0.55, Math.min(1, flash * S.effects))
     const rgb = new Uint8Array(room.len * 3)
     for (let v = 0; v < room.len; v++) {
       let r = Math.max(glow[0], f[0]), gg = Math.max(glow[1], f[1]), b = Math.max(glow[2], f[2])
@@ -293,16 +295,16 @@ async function start() {
         const age = (now - wv.born) / 1000
         const x = (d - age * wv.speed) / wv.width
         if (x < -2 || x > 2) continue
-        const a = Math.exp(-x * x) * wv.power * (1 - age / wv.life)
+        const a = Math.min(1, Math.exp(-x * x) * wv.power * (1 - age / wv.life) * S.effects)
         const c = hsv(wv.hue, 0.9, a)
         r = Math.max(r, c[0]); gg = Math.max(gg, c[1]); b = Math.max(b, c[2])
       }
-      const s = sparks[v]
+      const s = Math.min(1, sparks[v] * S.effects)
       r = Math.max(r, s); gg = Math.max(gg, s * 0.9); b = Math.max(b, s * 0.8)
       // The controller skips gamma for realtime data, so it is applied here
-      rgb[v * 3] = Math.round(255 * Math.pow(Math.min(1, r), GAMMA))
-      rgb[v * 3 + 1] = Math.round(255 * Math.pow(Math.min(1, gg), GAMMA))
-      rgb[v * 3 + 2] = Math.round(255 * Math.pow(Math.min(1, b), GAMMA))
+      rgb[v * 3] = Math.round(255 * Math.pow(Math.min(1, r * S.bright), GAMMA))
+      rgb[v * 3 + 1] = Math.round(255 * Math.pow(Math.min(1, gg * S.bright), GAMMA))
+      rgb[v * 3 + 2] = Math.round(255 * Math.pow(Math.min(1, b * S.bright), GAMMA))
     }
     window.live.frame(rgb)
     prev.set(bins)

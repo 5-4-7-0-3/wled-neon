@@ -53,6 +53,11 @@ function tone([r, g, b], k = 1.35) {
 
 async function start() {
   const room = await window.live.room()
+  // Brightness scales the light; smoothness slows how fast it follows the picture
+  const S = { bright: 1, smooth: 1, effects: 1, ...(await window.live.settings()) }
+  P.level *= S.bright
+  P.smoothCalm /= S.smooth
+  P.smoothCut /= S.smooth
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: P.fps, width: 640, height: 360 },
     audio: P.audio,
@@ -177,7 +182,8 @@ async function start() {
       const d = target[i] - out[i]
       const k = P.smoothCalm + (P.smoothCut - P.smoothCalm) * Math.min(1, Math.abs(d) / P.cut)
       out[i] += d * k
-      const v = Math.min(255, Math.max(0, out[i] * (1 + (extra?.gain?.[i] ?? 0)) + (extra?.add?.[i] ?? 0)))
+      const gain = (extra?.gain?.[i] ?? 0) * S.effects, add = (extra?.add?.[i] ?? 0) * S.effects * S.bright
+      const v = Math.min(255, Math.max(0, out[i] * (1 + gain) + add))
       rgb[i] = Math.round(255 * Math.pow(v / 255, GAMMA))
     }
     window.live.frame(rgb)

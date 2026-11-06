@@ -191,3 +191,16 @@ input[type=range]::-webkit-slider-thumb {
 .desktop .swatches { grid-template-columns: repeat(10, 1fr); gap: 6px; }
 .desktop .tile .swatch { height: 40px; }
 .desktop .tile { font-size: 13px; padding: 8px; border-radius: 12px; }
+
+.stepper { display: flex; gap: 10px; align-items: center; }
+.stepper input { flex: 1; }
+.stepper button {
+  width: 38px; height: 38px; flex: none; border-radius: 10px; border: none;
+  background: var(--line); color: var(--text); font-size: 20px;
+}
+select {
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px;
+}
+.current:disabled, button:disabled { opacity: .45; cursor: default; }
+.gear { color: var(--muted); font-size: 20px; line-height: 1; }
