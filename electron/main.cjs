@@ -1,6 +1,8 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, session, desktopCapturer } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
+const os = require('node:os')
+const http = require('node:http')
 const { spawn } = require('node:child_process')
 const dgram = require('node:dgram')
 const { ringIcon } = require('./icon.cjs')
@@ -13,41 +15,29 @@ const WIDTH = 360
 
 const cfgFile = () => path.join(app.getPath('userData'), 'config.json')
 let cfg = {
-  host: '192.168.1.12', autostartSet: false, anthem: true, games: true,
+  host: '', autostartSet: false, anthem: true, games: true,
   // How each live mode looks: brightness, smoothing and strength of its effects, 1 being as designed
   modes: { cinema: { bright: 1, smooth: 1 }, game: { bright: 1, smooth: 1, effects: 1 }, music: { bright: 1, effects: 1 } },
   // Games seen so far by exe path: whether to light up for them and which profile they get
   gameList: {},
+  windowSize: [520, 820],
 }
 
-// The room as calibrated in the app and kept on the controller (/neon.json), in the controller's
-// LED order (its LED map starts in the middle of the right short wall). Each wall: first LED, LED
-// count and the direction the strip runs. The screen wall runs from the picture's left edge to its
-// right with the monitor centre at `center`; side walls run from the screen towards the bed; `bed`
-// is the stretch above the bed. The defaults are the room as first measured.
-let setup = { corners: [12, 55, 81, 123], monitor: 21, bed: [82, 98], balance: [1, 1, 1] }
-let ledTotal = 136
-
-function room() {
-  const [c0, c1, c2, c3] = setup.corners
-  const len = ledTotal
-  return {
-    len,
-    screen: { start: c1 - 1, count: c1 - c0, step: -1, center: setup.monitor },
-    left: { start: c1, count: c2 - c1, step: 1 },
-    right: { start: c0 - 1, count: (c0 - c3 + len) % len, step: -1 },
-    bed: { start: setup.bed[0], count: setup.bed[1] - setup.bed[0] + 1 },
-  }
-}
+// Where the strip runs, as calibrated in the app and kept on the controller (/neon.json); the
+// geometry is shared with the app in room.mjs
+const roomLib = import('./room.mjs')
+let setup, ledTotal = 0, room
 
 async function loadSetup() {
   try {
     const [s, info] = await Promise.all([
-      fetch(`http://${cfg.host}/neon.json`).then((r) => (r.ok ? r.json() : {})),
+      // Anything but a clear "no such file" throws, and the last known room stays
+      fetch(`http://${cfg.host}/neon.json`).then((r) => (r.status === 404 ? null : r.json())),
       fetch(`http://${cfg.host}/json/info`).then((r) => r.json()),
     ])
-    setup = { ...setup, ...s }
     ledTotal = info.leds.count
+    setup = (await roomLib).normalize(s, ledTotal)
+    room = (await roomLib).buildRoom(setup, ledTotal)
   } catch {
     // Unreachable controller: keep what is known
   }
@@ -70,6 +60,9 @@ let win
 let light = { on: false, col: [255, 160, 60] }
 let online = false
 let lastHidden = 0
+let pinned = false
+let windowed = false
+let leaving = false
 
 // ---- Controller connection (tray icon + menu live in the main process) ----
 
@@ -77,6 +70,8 @@ let ws, retry
 function connect() {
   clearTimeout(retry)
   ws?.close()
+  // Until the first-run setup finds the controller there is nothing to connect to
+  if (!cfg.host) return
   const sock = new WebSocket(`ws://${cfg.host}/ws`)
   ws = sock
   sock.onopen = () => { online = true; refreshTray(); loadSetup() }
@@ -143,12 +138,18 @@ function setLive(mode) {
   })
 }
 
-ipcMain.handle('live:room', () => room())
+ipcMain.handle('live:room', async () => {
+  for (let i = 0; i < 10 && !room; i++) {
+    await loadSetup()
+    if (!room) await new Promise((r) => setTimeout(r, 1000))
+  }
+  return room
+})
 ipcMain.handle('live:settings', () => cfg.modes[liveMode] ?? {})
 ipcMain.on('live:frame', (_e, rgb) => {
   if (!udp) return
-  const k = setup.balance
-  if (k.some((v) => v !== 1)) for (let i = 0; i < rgb.length; i++) rgb[i] = Math.round(rgb[i] * k[i % 3])
+  const k = setup?.balance ?? [1, 1, 1]
+  for (let i = 0; i < rgb.length; i++) rgb[i] = room?.off[(i / 3) | 0] ? 0 : Math.round(rgb[i] * k[i % 3])
   // WLED "DRGB" realtime packet: protocol 2, then seconds to hold the frame if the stream stops
   udp.send(Buffer.concat([Buffer.from([2, 2]), Buffer.from(rgb)]), 21324, cfg.host)
 })
@@ -382,9 +383,9 @@ const NOT_GAME_APPS = /\\(chrome|msedge|firefox|opera|brave|vivaldi|vlc|mpc-hc64
 let gamePid, gameExe, gameWindow, gameSeen = 0, beforeGame, gameProfile = null, inGame = false, input
 
 // Games with a profile of their own in game.js, by where they are installed
-const PROFILES = [[/death stranding/i, 'deathStranding'], [/don'?t ?starve/i, 'dontStarve'], [/7 ?days ?to ?die/i, 'sevenDays']]
+const PROFILES = [[/death stranding 2/i, 'deathStranding2'], [/death stranding/i, 'deathStranding'], [/don'?t ?starve/i, 'dontStarve'], [/7 ?days ?to ?die/i, 'sevenDays']]
 // Profiles that react to game buttons; the others never need the input watcher
-const INPUT_PROFILES = ['deathStranding']
+const INPUT_PROFILES = ['deathStranding', 'deathStranding2']
 
 function isGame({ path: exe, full }) {
   if (!exe) return false
@@ -501,6 +502,7 @@ function trayMenu() {
   return Menu.buildFromTemplate([
     { label: light.on ? 'Вимкнути' : 'Увімкнути', enabled: online, click: () => send({ on: !light.on }) },
     { label: 'Відкрити панель', click: showWindow },
+    { label: 'Відкрити у вікні', click: openWindow },
     { type: 'separator' },
     { label: 'Прапор під гімн України', type: 'checkbox', checked: cfg.anthem, click: (i) => setAnthem(i.checked) },
     { label: 'Підсвітка для ігор', type: 'checkbox', checked: cfg.games, click: (i) => setGames(i.checked) },
@@ -528,28 +530,64 @@ function setAutostart(enabled) {
 
 // ---- Popup window ----
 
-function createWindow() {
-  win = new BrowserWindow({
-    width: WIDTH,
-    height: 600,
+// The panel is either the tray popup or an ordinary window. Only one exists at a time: the
+// controller takes a handful of websocket clients, and a second copy of the app would use one up.
+function createWindow(asWindow) {
+  windowed = asWindow
+  const [width, height] = cfg.windowSize
+  const w = new BrowserWindow({
+    ...(asWindow
+      ? { width, height, minWidth: WIDTH, minHeight: 480, autoHideMenuBar: true, backgroundColor: '#0b0b0f', title: 'Неон' }
+      : { width: WIDTH, height: 600, frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true, transparent: true, backgroundColor: '#00000000' }),
     show: false,
-    frame: false,
-    resizable: false,
-    skipTaskbar: true,
-    alwaysOnTop: true,
-    transparent: true,
-    backgroundColor: '#00000000',
     // The hidden popup still has to switch to the flag right away when the anthem starts
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), backgroundThrottling: false },
   })
-  if (DEV_URL) win.loadURL(DEV_URL)
-  else win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'))
+  win = w
+  if (DEV_URL) w.loadURL(asWindow ? `${DEV_URL}?window` : DEV_URL)
+  else w.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), asWindow ? { query: { window: '' } } : {})
 
-  win.on('blur', () => {
-    if (win.webContents.isDevToolsOpened()) return
-    win.hide()
-    lastHidden = Date.now()
-  })
+  if (asWindow) {
+    w.removeMenu()
+    w.on('session-end', () => { app.isQuitting = true })
+    w.on('close', (e) => {
+      if (app.isQuitting) return
+      e.preventDefault()
+      // Calibration has to put the light back first, which it does when it is left
+      if (pinned) {
+        leaving = true
+        w.webContents.send('win:leave')
+      } else closeToTray()
+    })
+  } else {
+    w.on('blur', () => {
+      if (w.isDestroyed() || w.webContents.isDevToolsOpened() || pinned) return
+      w.hide()
+      lastHidden = Date.now()
+    })
+  }
+}
+
+function replaceWindow(asWindow) {
+  const old = win
+  createWindow(asWindow)
+  old.destroy()
+}
+
+function closeToTray() {
+  if (!win.isMaximized()) {
+    cfg.windowSize = win.getSize()
+    saveConfig()
+  }
+  replaceWindow(false)
+}
+
+function openWindow() {
+  // Replacing the page mid-calibration would leave the strip showing the marks
+  if (!windowed && pinned) return showWindow()
+  if (!windowed) replaceWindow(true)
+  if (win.webContents.isLoading()) win.once('ready-to-show', showWindow)
+  else showWindow()
 }
 
 function placeWindow() {
@@ -567,12 +605,15 @@ function placeWindow() {
 }
 
 function showWindow() {
-  placeWindow()
+  if (windowed) {
+    if (win.isMinimized()) win.restore()
+  } else placeWindow()
   win.show()
   win.focus()
 }
 
 function toggleWindow() {
+  if (windowed) return showWindow()
   // A click on the tray icon blurs (and hides) the popup first; don't reopen it
   if (win.isVisible() || Date.now() - lastHidden < 300) win.hide()
   else showWindow()
@@ -581,18 +622,64 @@ function toggleWindow() {
 // ---- IPC ----
 
 ipcMain.handle('host:get', () => cfg.host)
+// The PC's own networks, for the first-run setup to look for the controller in
+const subnets = () => [...new Set(Object.values(os.networkInterfaces()).flat()
+  .filter((n) => n && n.family === 'IPv4' && !n.internal && !n.address.startsWith('169.254.'))
+  .map((n) => n.address.split('.').slice(0, 3).join('.')))]
+
+// Asks every address of the PC's networks for WLED's info at once. Done here rather than in the
+// window: the browser keeps a connection open to each silent address for a while and runs out of
+// them, after which even the controller's answer waits in the queue.
+function probe(ip) {
+  return new Promise((done) => {
+    const req = http.get({ host: ip, path: '/json/info', timeout: 1200 }, (res) => {
+      let body = ''
+      res.on('data', (c) => (body += c))
+      res.on('end', () => {
+        try {
+          const info = JSON.parse(body)
+          done(info?.leds?.count ? { ip, name: info.name || 'WLED', leds: info.leds.count } : null)
+        } catch {
+          done(null)
+        }
+      })
+    })
+    req.on('timeout', () => req.destroy())
+    req.on('error', () => done(null))
+  })
+}
+
+ipcMain.handle('net:find', async () => {
+  const ips = subnets().flatMap((n) => Array.from({ length: 254 }, (_, i) => `${n}.${i + 1}`))
+  return (await Promise.all(ips.map(probe))).filter(Boolean)
+})
 ipcMain.handle('host:set', (_e, host) => {
   cfg.host = String(host)
   saveConfig()
   connect()
 })
 ipcMain.on('win:resize', (_e, height) => {
-  const h = Math.max(200, Math.min(Math.round(height), 900))
+  if (windowed) return
+  // Taller content than the screen scrolls inside the popup
+  const room = screen.getDisplayNearestPoint(tray.getBounds()).workArea.height - 16
+  const h = Math.max(200, Math.min(Math.round(height), room))
   if (win.getSize()[1] === h) return
+  // A window that is not resizable has its limits locked to its size and would never get smaller
+  win.setResizable(true)
   win.setSize(WIDTH, h)
+  win.setResizable(false)
   if (win.isVisible()) placeWindow()
 })
-ipcMain.on('win:hide', () => win.hide())
+ipcMain.on('win:hide', () => { if (!windowed) win.hide() })
+ipcMain.on('win:open', openWindow)
+// Calibration paints over the light until it is left, so its window must not vanish behind a click
+ipcMain.on('win:pin', (_e, on) => {
+  pinned = !!on
+  if (pinned || !leaving) return
+  leaving = false
+  // Gives the request that restores the light time to leave before the page goes
+  setTimeout(closeToTray, 400)
+})
 
 const desktopSettings = () => ({
   anthem: cfg.anthem, games: cfg.games, autostart: app.getLoginItemSettings().openAtLogin,
@@ -635,7 +722,8 @@ function quit() {
   app.exit(0)
 }
 
-app.on('second-instance', showWindow)
+// Starting the app from its shortcut while it already runs in the tray
+app.on('second-instance', () => openWindow())
 app.on('window-all-closed', (e) => e.preventDefault())
 
 app.whenReady().then(() => {
@@ -668,7 +756,7 @@ app.whenReady().then(() => {
   tray.on('click', toggleWindow)
   tray.on('right-click', () => tray.popUpContextMenu(trayMenu()))
 
-  createWindow()
+  createWindow(!START_HIDDEN)
   connect()
   watch('media.ps1', onMedia)
   watch('foreground.ps1', onForeground)

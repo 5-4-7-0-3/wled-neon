@@ -1,3 +1,5 @@
+import { normalize, type Setup } from '../electron/room.mjs'
+
 export type RGB = [number, number, number]
 
 export interface Light {
@@ -141,33 +143,21 @@ export function toLight(s: WledState, prev: Light): Light {
 
 // ---- Room setup, kept on the controller in /neon.json so the phone and the PC share it ----
 
-// Positions are in the controller's LED order (after its LED map). The corners go round the room
-// starting from the right short wall's corner with the monitor wall: right→screen, screen→left,
-// left→back, back→right. `shift` is how far the LED map turns the strip, `balance` the white
-// balance every colour is scaled by.
-export interface Setup {
-  corners: [number, number, number, number]
-  monitor: number
-  bed: [number, number]
-  shift: number
-  balance: RGB
-}
+export type { Setup } from '../electron/room.mjs'
 
-export const DEFAULT_SETUP: Setup = {
-  corners: [12, 55, 81, 123],
-  monitor: 21,
-  bed: [82, 98],
-  shift: 13,
-  balance: [1, 1, 1],
-}
-
+// The setup completed with defaults; `done` is false until it has been saved once. Rejects when
+// the controller does not answer: only a clear "no such file" may count as never set up, or a
+// moment of bad Wi-Fi would look like a new controller and send a working one through the setup.
 export async function loadSetup(host: string): Promise<Setup> {
-  try {
-    const s = await fetch(`http://${host}/neon.json`).then((r) => r.json())
-    return { ...DEFAULT_SETUP, ...s }
-  } catch {
-    return DEFAULT_SETUP
-  }
+  const [raw, len] = await Promise.all([
+    fetch(`http://${host}/neon.json`).then((r) => {
+      if (r.status === 404) return null
+      if (!r.ok) throw new Error(`neon.json: ${r.status}`)
+      return r.json()
+    }),
+    ledCount(host),
+  ])
+  return normalize(raw, len)
 }
 
 const upload = (host: string, name: string, data: unknown) => {

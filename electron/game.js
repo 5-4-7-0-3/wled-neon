@@ -79,7 +79,9 @@ window.onScreenStream = (stream, r) => {
 // Energy and rise of the sound between two frequencies, both channels together or one of them
 function measure(lo, hi, ch) {
   const chans = ch ? [ch] : [sound.L, sound.R]
-  const a = Math.max(1, Math.floor(lo / sound.hz)), b = Math.ceil(hi / sound.hz)
+  // A band narrower than one analyser step (about 94 Hz) still gets the step it falls in, or the
+  // deep sounds (heartbeat, rumble) would measure nothing at all
+  const a = Math.max(1, Math.floor(lo / sound.hz)), b = Math.max(a + 1, Math.ceil(hi / sound.hz))
   let e = 0, f = 0
   for (const c of chans) {
     for (let i = a; i < b; i++) {
@@ -93,8 +95,7 @@ function measure(lo, hi, ch) {
 
 // Signed position round the room from the monitor: `d` LEDs away, `dir` 1 to the left, -1 to the right
 function fromMonitor(v) {
-  const towardsLeft = (v - room.screen.center + room.len) % room.len
-  return towardsLeft <= room.len / 2 ? { d: towardsLeft, dir: 1 } : { d: room.len - towardsLeft, dir: -1 }
+  return { d: room.d[v], dir: room.dir[v] }
 }
 
 const addLight = (v, [r, g, b], k) => {
@@ -184,13 +185,96 @@ const PROFILES = {
   //  - scan (Q, or tapping the bumper): a white-blue ring runs from the monitor round the room
   //  - timefall: grey-blue picture with the hiss of rain; the room cools and grey drops creep along
   //    the ceiling
-  deathStranding() {
+  // Death Stranding 2 (`two`) adds the disasters of its world:
+  //  - earthquake: a deep rumble that goes on for seconds; the whole room trembles in dusty amber
+  //  - sandstorm: an ochre haze over the picture and the roar of wind; the room turns ochre and sand
+  //    streams along the ceiling with the wind
+  //  - wildfire: much of the picture in flame; the room flickers red-orange and embers flare up
+  //  - blizzard: a white picture and the wind; the room goes cold white and snow drifts along it
+  deathStranding(two = false) {
     const ODRADEK = [255, 110, 20]
     const SCAN = [170, 225, 255]
     const HEART = [255, 25, 35]
     const DROP = [110, 140, 185]
+    const QUAKE = [200, 130, 60], SAND = [215, 140, 55], FLAME = [255, 75, 12], SNOW = [215, 230, 255]
     let bt = 0, breath = 0, holding = false, rain = 0
     let scans = [], beats = [], drops = [], beatHist = [], lastBeat = 0
+    let quake = 0, rumbleAvg = 0.1, rumbling = 0, storm = 0, blaze = 0, blizzard = 0, windSide = 1
+    let grains = [], embers = [], flakes = []
+
+    // Shares of the picture that are hazy ochre (sand in the air), flame, and snow white
+    const weather = ({ px, W, top, bottom, left, right }) => {
+      let sand = 0, flame = 0, snow = 0, n = 0
+      for (let y = top; y <= bottom; y++) {
+        for (let x = left; x <= right; x++) {
+          const i = (y * W + x) * 4
+          const r = px[i], g = px[i + 1], b = px[i + 2]
+          const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+          const sat = mx > 20 ? (mx - mn) / mx : 0
+          n++
+          if (r === mx && mx > 70 && mx < 225 && sat > 0.15 && sat < 0.6 && g > r * 0.55 && g < r * 0.9 && b < g * 0.8) sand++
+          if (r > 200 && g > r * 0.25 && g < r * 0.7 && b < r * 0.3) flame++
+          if (mx > 180 && sat < 0.12 && b >= r) snow++
+        }
+      }
+      return { sand: sand / n, flame: flame / n, snow: snow / n }
+    }
+
+    // The game's own disasters, read from the picture and the sound, and drawn on top
+    const disasters = (now, frame) => {
+      const w = weather(frame)
+      // A quake rumbles on for seconds well above the usual low end; a blast is over in a moment
+      const rumble = measure(25, 70).e
+      rumbleAvg += (rumble - rumbleAvg) * 0.003
+      rumbling = rumble > Math.max(0.3, rumbleAvg * 1.8) ? rumbling + 1 : Math.max(0, rumbling - 2)
+      quake += ((rumbling > 50 ? 1 : 0) - quake) * (rumbling > 50 ? 0.08 : 0.03)
+
+      // Wind is a loud, steady roar rather than single sounds; its louder side is where it blows from
+      const l = measure(300, 3000, sound.L), r = measure(300, 3000, sound.R)
+      const windy = (l.e + r.e) / 2 > 0.15 && (l.f + r.f) < (l.e + r.e) * 0.15
+      if (windy && Math.abs(l.e - r.e) > 0.03) windSide = l.e > r.e ? -1 : 1
+      storm += ((w.sand > 0.45 && windy ? 1 : 0) - storm) * 0.01
+      blizzard += ((w.snow > 0.5 && windy ? 1 : 0) - blizzard) * 0.01
+      // The odradek's glow near BTs is orange too, but only a speck of the picture
+      blaze += ((w.flame > 0.02 && bt < 0.2 ? Math.min(1, w.flame * 15) : 0) - blaze) * 0.03
+
+      if (storm > 0.1) for (let k = 0; k < 2; k++) if (Math.random() < storm * 0.5) grains.push({ born: now, at: Math.random() * room.len })
+      grains = grains.filter((g) => now - g.born < 1200)
+      if (blaze > 0.2 && Math.random() < blaze * 0.25) embers.push({ born: now, at: Math.floor(Math.random() * room.len) })
+      embers = embers.filter((e) => now - e.born < 600)
+      if (blizzard > 0.1 && Math.random() < blizzard * 0.3) flakes.push({ born: now, at: Math.random() * room.len })
+      flakes = flakes.filter((f) => now - f.born < 3000)
+
+      const t = now / 1000
+      const calm = 1 - breath * 0.7
+      for (let v = 0; v < room.len; v++) {
+        const { d } = fromMonitor(v)
+        const i = v * 3
+        // The room shakes as one, a little out of step from wall to wall
+        const shake = quake * (0.3 * Math.sin(t * 37 + v * 0.05) + 0.2 * Math.sin(t * 23.7 + v * 0.11))
+        const dim = storm * 0.35
+        gain[i] = gain[i + 1] = gain[i + 2] = (gain[i] + shake) * (1 - dim) - dim
+        addLight(v, QUAKE, 0.12 * quake * calm)
+        addLight(v, SAND, 0.28 * storm * calm)
+        addLight(v, SNOW, 0.2 * blizzard * calm)
+        const flicker = 0.6 + 0.25 * Math.sin(t * 8.1 + v * 0.5) + 0.15 * Math.sin(t * 14.3 + v * 1.1)
+        addLight(v, FLAME, 0.5 * blaze * flicker * (0.4 + 0.6 * Math.exp(-d / 30)) * calm)
+      }
+      for (const g of grains) {
+        const age = (now - g.born) / 1000
+        const v = Math.floor(((g.at + windSide * age * 30) % room.len + room.len) % room.len)
+        addLight(v, SAND, 0.45 * storm * (1 - age / 1.2) * calm)
+      }
+      for (const e of embers) {
+        const k = 1 - (now - e.born) / 600
+        addLight(e.at, [255, 160, 40], 0.7 * blaze * k * k * calm)
+      }
+      for (const f of flakes) {
+        const age = (now - f.born) / 1000
+        const v = Math.floor(((f.at + windSide * age * 5 + Math.sin(age * 3) * 1.5) % room.len + room.len) % room.len)
+        addLight(v, [240, 248, 255], 0.4 * blizzard * Math.sin((Math.PI * age) / 3) * calm)
+      }
+    }
 
     return {
       input(e) {
@@ -258,9 +342,11 @@ const PROFILES = {
             addLight(v, DROP, 0.35 * rain * (1 - age / 2.5) * (1 - k / 3))
           }
         }
+        if (two && sound) disasters(now, frame)
       },
     }
   },
+  deathStranding2: () => PROFILES.deathStranding(true),
 
   // Don't Starve Together (and Don't Starve)
   //  - night by a fire: the picture is dark around a warm spot; the room dims and firelight

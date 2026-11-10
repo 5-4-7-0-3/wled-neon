@@ -1,9 +1,17 @@
 // Bridge exposed by electron/preload.cjs; absent on Android
 interface DesktopBridge {
   getHost(): Promise<string>
+  // WLED controllers that answer on the PC's own networks
+  findControllers(): Promise<{ ip: string; name: string; leds: number }[]>
   setHost(host: string): Promise<void>
   resize(height: number): void
   hide(): void
+  // Keeps the popup open when it loses focus, while the user is looking at the strip
+  pin(on: boolean): void
+  // Swaps the tray popup for an ordinary resizable window
+  openWindow(): void
+  // The ordinary window is being closed while a calibration screen is open; returns the unsubscribe
+  onLeave(cb: () => void): () => void
   // Fired by the main process when the Ukrainian anthem starts playing
   onFlag(cb: () => void): void
   getSettings(): Promise<DesktopSettings>
@@ -40,8 +48,10 @@ declare global {
 }
 
 export const desktop = window.neonDesktop
+export const windowed = new URLSearchParams(location.search).has('window')
 
-const DEFAULT_HOST = '192.168.1.12'
+// Empty until the first-run setup finds the controller
+const DEFAULT_HOST = ''
 const KEY = 'neon.host'
 
 export async function getHost(): Promise<string> {

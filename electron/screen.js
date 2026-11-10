@@ -106,53 +106,39 @@ async function start() {
     target[i] = r * k * P.level; target[i + 1] = g * k * P.level; target[i + 2] = b * k * P.level
   }
 
+  // Each LED shows the part of the picture its role in the room says (see room.mjs)
   const paintPicture = () => {
     const all = tone(avg(left, right + 1, top, bottom + 1))
-    for (let v = 0; v < room.len; v++) put(v, all, P.back)
-
-    // The picture is centred on the monitor, so each half is stretched over its side of the wall
-    const s = room.screen
-    const mid = (s.center - s.start) / s.step
     const [sy0, sy1] = P.screenBand.map((f) => top + ch * f)
-    for (let k = 0; k < s.count; k++) {
-      const x = k < mid ? (0.5 * k) / mid : 0.5 + (0.5 * (k - mid)) / Math.max(1, s.count - 1 - mid)
-      const x0 = left + Math.min(x, 0.98) * cw
-      put(s.start + k * s.step, tone(avg(x0, x0 + Math.max(1, cw / s.count), sy0, sy1)))
-    }
-    if (P.aboveBed !== null) for (let k = 0; k < room.bed.count; k++) put(room.bed.start + k, all, P.aboveBed)
-    const edge = cw * 0.15
     const [ey0, ey1] = P.sideBand.map((f) => top + ch * f)
-    const sides = [[room.left, avg(left, left + edge, ey0, ey1)], [room.right, avg(right + 1 - edge, right + 1, ey0, ey1)]]
-    for (const [wall, c] of sides) {
-      const col = tone(c)
-      for (let k = 0; k < wall.count; k++) put(wall.start + k * wall.step, col, 1 - (P.sideFade * k) / Math.max(1, wall.count - 1))
-    }
+    const X = (f) => left + f * cw, Y = (f) => top + f * ch
+    room.roles.forEach((r, v) => {
+      if (r.role === 'front') put(v, tone(avg(X(r.x0), Math.max(X(r.x1), X(r.x0) + 1), sy0, sy1)))
+      else if (r.role === 'side') put(v, tone(avg(X(r.x0), X(r.x1), ey0, ey1)), 1 - P.sideFade * r.t)
+      else if (r.role === 'edge') put(v, tone(avg(X(r.x0), Math.max(X(r.x1), X(r.x0) + 1), Y(r.y0), Math.max(Y(r.y1), Y(r.y0) + 1))))
+      else if (r.role === 'bed' && P.aboveBed !== null) put(v, all, P.aboveBed)
+      else if (r.role !== 'off') put(v, all, P.back)
+      else put(v, [0, 0, 0])
+    })
   }
 
   const paintMood = () => {
     const half = left + cw / 2
     const moodL = tone(mood(left, half, top, bottom + 1))
     const moodR = tone(mood(half, right + 1, top, bottom + 1))
-    const centre = room.screen.center
     for (let v = 0; v < room.len; v++) {
-      // Distance round the room from the monitor; the screen wall's index grows to the left
-      const towardsLeft = (v - centre + room.len) % room.len
-      const onLeft = towardsLeft <= room.len / 2
-      const d = onLeft ? towardsLeft : room.len - towardsLeft
-      put(v, onLeft ? moodL : moodR, P.floor + (1 - P.floor) * Math.exp(-d / P.spread))
+      put(v, room.dir[v] === 1 ? moodL : moodR, P.floor + (1 - P.floor) * Math.exp(-room.d[v] / P.spread))
     }
     if (!P.detail) return
-    // The screen wall mixes in the top of the picture across the wall, the way cinema does
-    const s = room.screen
-    const mid = (s.center - s.start) / s.step
+    // The LEDs facing the picture mix in the picture itself, the way cinema does
     const [sy0, sy1] = P.screenBand.map((f) => top + ch * f)
-    for (let k = 0; k < s.count; k++) {
-      const x = k < mid ? (0.5 * k) / mid : 0.5 + (0.5 * (k - mid)) / Math.max(1, s.count - 1 - mid)
-      const x0 = left + Math.min(x, 0.98) * cw
-      const pic = tone(mood(x0, x0 + Math.max(1, cw / s.count), sy0, sy1))
-      const i = (((s.start + k * s.step) % room.len) + room.len) % room.len * 3
-      for (let c = 0; c < 3; c++) target[i + c] += (pic[c] * P.level - target[i + c]) * P.detail
-    }
+    room.roles.forEach((r, v) => {
+      if (r.role !== 'front' && r.role !== 'edge') return
+      const [y0, y1] = r.role === 'edge' ? [top + r.y0 * ch, top + r.y1 * ch] : [sy0, sy1]
+      const x0 = left + r.x0 * cw
+      const pic = tone(mood(x0, Math.max(left + r.x1 * cw, x0 + 1), y0, Math.max(y1, y0 + 1)))
+      for (let c = 0; c < 3; c++) target[v * 3 + c] += (pic[c] * P.level - target[v * 3 + c]) * P.detail
+    })
   }
 
   const tick = () => {

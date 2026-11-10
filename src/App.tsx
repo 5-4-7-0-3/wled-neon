@@ -3,7 +3,8 @@ import {
   PAL_FOR_COUNT, STATIC, Wled, countFromPal, equalBounds, layout, loadSetup, pieces, toLight, type Light, type Preset, type RGB,
 } from './wled'
 import { Settings } from './Settings'
-import { desktop, getHost, setHost } from './platform'
+import { Wizard } from './Wizard'
+import { desktop, getHost, setHost, windowed } from './platform'
 
 const COLORS: RGB[] = [
   [255, 160, 60], [255, 255, 255], [255, 0, 0], [255, 90, 0], [255, 200, 0],
@@ -109,6 +110,7 @@ export function App() {
   const [online, setOnline] = useState(false)
   const [host, setHostState] = useState<string>()
   const [settings, setSettings] = useState(false)
+  const [wizard, setWizard] = useState<'host' | 'setup' | null>(null)
   const [picking, setPicking] = useState(false)
   const [presets, setPresets] = useState<Preset[]>([])
   const [naming, setNaming] = useState(false)
@@ -119,7 +121,7 @@ export function App() {
   const root = useRef<HTMLElement>(null)
   const bar = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { getHost().then(setHostState) }, [])
+  useEffect(() => { getHost().then((h) => (h ? setHostState(h) : setWizard('host'))) }, [])
 
   useEffect(() => {
     if (!host) return
@@ -131,7 +133,12 @@ export function App() {
     wled.current = w
     w.presets().then(setPresets, () => {})
     // Colours are shown without the white balance, so the state is read again once it is known
-    loadSetup(host).then((s) => { w.balance = s.balance; w.refresh() })
+    loadSetup(host).then((s) => {
+      w.balance = s.balance
+      w.refresh()
+      // A controller that answers but was never set up goes through the first-run setup
+      if (!s.done) setWizard((v) => v ?? 'setup')
+    }, () => {})
     return () => w.close()
   }, [host])
 
@@ -166,6 +173,9 @@ export function App() {
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  // On the desktop the page body is what scrolls, and each screen starts from its top
+  useLayoutEffect(() => { document.body.scrollTop = 0 }, [settings, picking, wizard])
 
   useEffect(() => {
     const d = desktop
@@ -281,11 +291,23 @@ export function App() {
     setHost(h).then(() => setHostState(h))
   }
 
+
   const current = light.cols[active]
   const colorful = Math.max(...current) - Math.min(...current) > 40
   const vars = { '--c': light.cols[0].join(',') } as React.CSSProperties
   const showColors = !isFlag && !light.live && (style?.colors ?? true)
   const pct = (v: number) => `${(v / light.len) * 100}%`
+
+  if (wizard) {
+    return (
+      <main ref={root} className="panel" style={vars}>
+        <Wizard
+          host={host} wled={wled.current} needHost={wizard === 'host'} setHost={saveHost}
+          finish={() => setWizard(null)}
+        />
+      </main>
+    )
+  }
 
   if (settings) {
     return (
@@ -324,6 +346,9 @@ export function App() {
         <h1>Неон</h1>
         <span className={online ? 'dot ok' : 'dot'} title={online ? 'Контролер на зв’язку' : 'Немає зв’язку з контролером'} />
         <span className="spacer" />
+        {desktop && !windowed && (
+          <button className="icon gear" onClick={() => desktop?.openWindow()} aria-label="Відкрити у вікні" title="Відкрити у вікні">⧉</button>
+        )}
         <button className="icon gear" onClick={() => setSettings(true)} aria-label="Налаштування">⚙</button>
         <button
           role="switch" aria-checked={light.on} aria-label="Живлення"

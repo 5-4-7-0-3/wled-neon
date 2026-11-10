@@ -170,16 +170,29 @@ input[type=range]::-webkit-slider-thumb {
 .host button { padding: 0 16px; border-radius: 10px; border: none; background: rgb(var(--c)); color: var(--bg); font-weight: 600; }
 
 /* Desktop tray popup: compact, framed, transparent window around it */
-.desktop, .desktop body { background: transparent; overflow: hidden; }
+.desktop, .desktop body { background: transparent; }
+.desktop { overflow: hidden; }
+/* The body scrolls rather than the panel: the panel keeps its full height, which is what the
+   popup measures to size itself */
+.desktop body { height: 100vh; overflow-y: auto; border-radius: 14px; }
+.desktop body::after {
+  content: ''; position: fixed; inset: 0; z-index: 10; pointer-events: none;
+  border: 1px solid var(--line); border-radius: 14px;
+}
+.desktop body::-webkit-scrollbar { width: 6px; }
+.desktop body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 .desktop #root { display: block; }
 .desktop .panel {
   max-width: none;
   padding: 14px;
   gap: 12px;
   background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 14px;
 }
+.windowed, .windowed body { background: var(--bg); }
+.windowed body { border-radius: 0; }
+.windowed body::after { display: none; }
+.windowed #root { display: flex; }
+.windowed .panel { max-width: 560px; padding: 18px; }
 .desktop h1 { font-size: 18px; }
 .desktop .card { border-radius: 12px; padding: 12px; gap: 8px; }
 .desktop input[type=range] { height: 26px; }
@@ -204,3 +217,25 @@ select {
 }
 .current:disabled, button:disabled { opacity: .45; cursor: default; }
 .gear { color: var(--muted); font-size: 20px; line-height: 1; }
+.warn { color: #ff8a65; }
+.row span:last-child { white-space: nowrap; }
+
+.map { width: 100%; display: block; }
+.map text { font-size: 12px; text-anchor: middle; }
+.map-label { fill: var(--muted); }
+.map-screen { fill: none; stroke-width: 7; }
+.map-thing rect { fill: var(--muted); }
+.map-thing text { fill: var(--muted); }
+.map-hint { text-align: center; }
+.dot-mark { cursor: pointer; outline: none; }
+.dot-mark .hit { fill: transparent; }
+.dot-mark .body { fill: #2a2b33; stroke: #8b8d98; stroke-width: 2; }
+.dot-mark text { fill: var(--text); font-weight: 600; }
+.dot-mark .num { fill: var(--muted); font-size: 11px; font-weight: 400; paint-order: stroke; stroke: var(--panel, #15151c); stroke-width: 3px; }
+.dot-mark.set .body { fill: #1f6f49; stroke: #30a46c; }
+.dot-mark.on .body { fill: #fff; stroke: #fff; }
+.dot-mark.on text:not(.num) { fill: #111; }
+.dot-mark .ring { fill: none; stroke: #fff; stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: dot-pulse 1.3s ease-out infinite; }
+@keyframes dot-pulse { from { transform: scale(1); opacity: .9; } to { transform: scale(1.9); opacity: 0; } }
+.row strong { color: var(--text); font-size: 15px; font-weight: 600; }
+.name-row .wide { flex: 1; padding: 11px 14px; }
